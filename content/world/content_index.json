@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "loadGlobalNpcInstancesFile": true,
+  "loadGlobalEstablishmentsFile": true,
+  "includeGlobalEventDirectory": true,
+  "includeGlobalQuestDirectory": true,
+  "regions": []
+}

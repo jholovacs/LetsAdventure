@@ -225,9 +225,11 @@
           <Button Content="Apply nav grid" Margin="0,16,0,0" HorizontalAlignment="Left" Click="NavGridApply_Click" />
         </StackPanel>
       </TabItem>
-      <TabItem Header="Map preview">
+      <TabItem Header="Map preview" x:Name="MapPreviewTab">
         <DockPanel Margin="8">
           <StackPanel DockPanel.Dock="Top">
+            <TextBlock Margin="0,0,0,6" Foreground="#444" TextWrapping="Wrap"
+                       Text="Wheel: zoom. Ctrl+wheel: raster detail. WASD: pan N/W/S/E. Hold LMB and drag to grab-pan. Toggle overlays below." />
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
               <Label Content="Vector scale (px / world unit):" VerticalAlignment="Center" />
               <Slider x:Name="SldPreviewScale" Width="200" Minimum="0.25" Maximum="6" Value="2" TickFrequency="0.25"
@@ -239,7 +241,15 @@
                         Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
               <CheckBox x:Name="ChkPreviewHillshade" Content="Hillshade" IsChecked="True" Margin="16,0,0,0"
                         Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
-              <CheckBox x:Name="ChkPreviewVectors" Content="Regions / territories / features" IsChecked="True" Margin="16,0,0,0"
+              <Button Content="Fit entire map" Margin="16,0,0,0" Padding="8,2" VerticalAlignment="Center"
+                      Click="MapPreviewFit_Click" ToolTip="Zoom so the full map fits in the window." />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <CheckBox x:Name="ChkPreviewLoreRegions" Content="Lore region borders" IsChecked="True"
+                        Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
+              <CheckBox x:Name="ChkPreviewTerritoryBorders" Content="Territory (faction) borders" IsChecked="True" Margin="16,0,0,0"
+                        Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
+              <CheckBox x:Name="ChkPreviewFeatures" Content="Features (paths, water, plateaus)" IsChecked="True" Margin="16,0,0,0"
                         Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
@@ -250,7 +260,16 @@
             </StackPanel>
           </StackPanel>
           <Border BorderBrush="Gray" BorderThickness="1" Background="#FFF8F8F8">
-            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+            <ScrollViewer x:Name="MapPreviewScrollViewer"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto"
+                          Focusable="True"
+                          Cursor="Hand"
+                          PreviewMouseWheel="MapPreviewScrollViewer_OnPreviewMouseWheel"
+                          PreviewMouseLeftButtonDown="MapPreviewScrollViewer_OnPreviewMouseLeftButtonDown"
+                          MouseMove="MapPreviewScrollViewer_OnMouseMove"
+                          PreviewMouseLeftButtonUp="MapPreviewScrollViewer_OnPreviewMouseLeftButtonUp"
+                          LostMouseCapture="MapPreviewScrollViewer_OnLostMouseCapture">
               <Canvas x:Name="PreviewCanvas" Width="2000" Height="2000" />
             </ScrollViewer>
           </Border>
@@ -303,6 +322,12 @@
                   <Slider x:Name="Sld3DTerrainSub" Minimum="1" Maximum="6" Value="3" TickFrequency="1"
                           IsSnapToTickEnabled="True" ValueChanged="World3D_TerrainDetail_Changed" />
                   <TextBlock x:Name="Txt3DTerrainSubValue" Text="3" Margin="0,-4,0,4" />
+                  <Label Content="Chunked worlds: high-res radius (nav cells each side of orbit focus; 0 = distant coarse only)"
+                         Margin="0,8,0,0" />
+                  <Slider x:Name="Sld3DChunkDetailHalf" Minimum="0" Maximum="192" Value="72" TickFrequency="8"
+                          IsSnapToTickEnabled="True" ValueChanged="World3D_ChunkDetailHalf_Changed"
+                          ToolTip="Rebuild 3D after moving focus (WASD / Set focus) to refresh this patch. Capped for GPU." />
+                  <TextBlock x:Name="Txt3DChunkDetailHalfValue" Text="72" Margin="0,-4,0,4" />
                   <CheckBox x:Name="Chk3DTerrainHaze" Content="Aerial perspective (distant terrain fades toward sky)"
                             IsChecked="True" Checked="World3D_TerrainHaze_Changed" Unchecked="World3D_TerrainHaze_Changed" />
                 </StackPanel>
@@ -316,7 +341,8 @@
                   <CheckBox x:Name="Chk3DNavGraph" Content="Nav graph" IsChecked="True" Checked="World3D_Layer_Changed" Unchecked="World3D_Layer_Changed" />
                 </StackPanel>
               </GroupBox>
-              <Button Content="Rebuild 3D meshes" Margin="0,12,0,0" HorizontalAlignment="Left" Click="World3D_Rebuild_Click" />
+              <Button Content="Rebuild 3D meshes" Margin="0,12,0,0" HorizontalAlignment="Left" Click="World3D_Rebuild_Click"
+                      ToolTip="Chunked terrain: updates the high-res patch around the current orbit focus." />
             </StackPanel>
           </ScrollViewer>
           <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1" Background="#FF6BB8D6">

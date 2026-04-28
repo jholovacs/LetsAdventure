@@ -29,13 +29,13 @@ This document describes the **data models** under `content/` and how they connec
 
 ### 1.1 Region-scaled loading (`content/world/content_index.json`)
 
-**Optional.** If this file is **missing**, `ContentPack.Load` uses the **legacy flat layout** (everything in the paths above). If it **exists**, the engine loads a **core** slice (still from `content/`) plus **per-region bundles** under folders you declare, then merges them for gameplay.
+**Required.** The file must exist at `content/world/content_index.json`. It selects the **core** slice (still from `content/`) and optional **per-region bundles** under folders you declare; `ToContentPack()` merges active regions for gameplay. An index with empty `regions` loads core-only (global paths above).
 
 | Path | Role |
 |------|------|
 | `content/world/content_index.json` | `schemaVersion`, boolean flags, optional `coreEventFiles` / `coreQuestFiles` (paths under `content/`), and `regions[]` |
 
-**Flags** (default `true` in data): `loadGlobalNpcInstancesFile`, `loadGlobalEstablishmentsFile`, `includeGlobalEventDirectory`, `includeGlobalQuestDirectory`. When a flag is `false`, the corresponding global file or directory is skipped at core load so that content can live only in regions.
+**Flags** (set explicitly in JSON; `System.Text.Json` does not apply C# property defaults for missing keys): `loadGlobalNpcInstancesFile`, `loadGlobalEstablishmentsFile`, `includeGlobalEventDirectory`, `includeGlobalQuestDirectory`. When a flag is `false`, the corresponding global file or directory is skipped at core load so that content can live only in regions.
 
 **Each region object:** `loreRegionId` (e.g. `region.jade_threshold`), `directory` (e.g. `world/regions/jade_threshold`), `npcInstancesFile` (default `npcs.json`), optional `establishmentsFile` (default `establishments.json`; omit or set `null` to skip), optional `physicalOverlayFile` (default `physical.json`), plus `eventFiles` / `questFiles` — arrays of paths **relative to `content/`** (same as `coreEventFiles`).
 
@@ -44,8 +44,6 @@ This document describes the **data models** under `content/` and how they connec
 **Merge rules:** Regions are applied in **index order**; later entries **override** the same id for events, quests, NPC instances, and establishments. Physical overlays are merged in that order via the engine’s `PhysicalWorldMerger`.
 
 **Runtime:** `WorldRuntimeSession.Load(contentRoot)` loads core + index; `ToContentPack()` returns the **merged** `ContentPack`. Omit the second argument to activate **all** regions in the index, or pass a subset of `loreRegionId` strings (e.g. the player’s current region) to **lazy-load** only those bundles. Call `SetActiveLoreRegions` when the active set changes; inactive bundles may be dropped from the session cache. Use `CoreContent` for the core pack without regional overlays.
-
-**Rollback:** Delete `content_index.json` and consolidate JSON back into the global paths if you need a single-file workflow again.
 
 ---
 

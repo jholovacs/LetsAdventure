@@ -164,19 +164,15 @@ public sealed class ContentPack
             Cultivation = cultivation,
         };
 
-    /// <summary>Loads core data only (used with <see cref="WorldContentIndex"/> streaming layout).</summary>
+    /// <summary>Loads core data using <see cref="WorldContentIndex"/> (see <c>world/content_index.json</c>).</summary>
     internal static ContentPack LoadCore(string contentRoot, WorldContentIndex index) =>
         LoadContentRoot(contentRoot, index);
 
-    /// <summary>Legacy flat layout: same as <see cref="Load"/> when <c>world/content_index.json</c> is absent.</summary>
-    internal static ContentPack LoadFlat(string contentRoot) =>
-        LoadContentRoot(contentRoot, null);
-
-    /// <summary>Eager pack: legacy flat layout, or merged view when <c>world/content_index.json</c> exists.</summary>
+    /// <summary>Eager pack: core from the content index plus merged active region bundles.</summary>
     public static ContentPack Load(string contentRoot) =>
         WorldRuntimeSession.Load(contentRoot).ToContentPack();
 
-    private static ContentPack LoadContentRoot(string contentRoot, WorldContentIndex? streamIndex)
+    private static ContentPack LoadContentRoot(string contentRoot, WorldContentIndex streamIndex)
     {
         var lorePath = Path.Combine(contentRoot, "lore", "bible.json");
         var loreJson = File.ReadAllText(lorePath);
@@ -191,7 +187,7 @@ public sealed class ContentPack
 
         var eventsDir = Path.Combine(contentRoot, "events");
         var events = new Dictionary<string, EventDefinition>(StringComparer.Ordinal);
-        if (streamIndex is null || streamIndex.IncludeGlobalEventDirectory)
+        if (streamIndex.IncludeGlobalEventDirectory)
         {
             if (Directory.Exists(eventsDir))
             {
@@ -205,7 +201,7 @@ public sealed class ContentPack
             }
         }
 
-        if (streamIndex?.CoreEventFiles is { Count: > 0 } coreEv)
+        if (streamIndex.CoreEventFiles is { Count: > 0 } coreEv)
         {
             foreach (var rel in coreEv)
             {
@@ -221,7 +217,7 @@ public sealed class ContentPack
 
         var questsDir = Path.Combine(contentRoot, "quests");
         var quests = new Dictionary<string, QuestBlueprintData>(StringComparer.Ordinal);
-        if (streamIndex is null || streamIndex.IncludeGlobalQuestDirectory)
+        if (streamIndex.IncludeGlobalQuestDirectory)
         {
             if (Directory.Exists(questsDir))
             {
@@ -235,7 +231,7 @@ public sealed class ContentPack
             }
         }
 
-        if (streamIndex?.CoreQuestFiles is { Count: > 0 } coreQ)
+        if (streamIndex.CoreQuestFiles is { Count: > 0 } coreQ)
         {
             foreach (var rel in coreQ)
             {
@@ -251,7 +247,7 @@ public sealed class ContentPack
 
         var estPath = Path.Combine(contentRoot, "world", "establishments.json");
         var establishments = new Dictionary<string, Establishment>(StringComparer.Ordinal);
-        if ((streamIndex is null || streamIndex.LoadGlobalEstablishmentsFile) && File.Exists(estPath))
+        if (streamIndex.LoadGlobalEstablishmentsFile && File.Exists(estPath))
         {
             var estJson = File.ReadAllText(estPath);
             var list = JsonSerializer.Deserialize<EstablishmentListFile>(estJson, GameJson.Options);
@@ -277,7 +273,7 @@ public sealed class ContentPack
 
         var instPath = Path.Combine(contentRoot, "world", "npc_instances.json");
         var npcInstances = new Dictionary<string, NpcInstanceProfile>(StringComparer.Ordinal);
-        if ((streamIndex is null || streamIndex.LoadGlobalNpcInstancesFile) && File.Exists(instPath))
+        if (streamIndex.LoadGlobalNpcInstancesFile && File.Exists(instPath))
         {
             var iJson = File.ReadAllText(instPath);
             var iFile = JsonSerializer.Deserialize<NpcInstanceListFile>(iJson, GameJson.Options);

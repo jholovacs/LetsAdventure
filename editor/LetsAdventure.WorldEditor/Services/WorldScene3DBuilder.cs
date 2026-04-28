@@ -21,6 +21,17 @@ public sealed class WorldScene3DOptions
 
     /// <summary>Blend distant terrain color toward sky for depth (editor preview).</summary>
     public bool TerrainAerialPerspective { get; set; } = true;
+
+    /// <summary>World XY used to center the high-res terrain patch when the nav grid is chunked. Usually orbit focus.</summary>
+    public Vec3? TerrainDetailAnchorWorld { get; set; }
+
+    /// <summary>
+    /// For chunked nav grids: nav cells on each side of the anchor to build at full subdiv resolution. 0 = distant coarse only.
+    /// </summary>
+    public int TerrainDetailCellHalfExtent { get; set; } = 72;
+
+    /// <summary>Hard cap on detail patch width/height in cells (after chunk alignment).</summary>
+    public int TerrainDetailMaxCellsPerAxis { get; set; } = 288;
 }
 
 /// <summary>Builds a WPF 3D model: world X,Y horizontal and Z up map to WPF (X, Z, -Y) so Y is up in the viewport.</summary>
@@ -464,6 +475,8 @@ public static class WorldScene3DBuilder
         var r0 = (int)Math.Floor(fy);
         if (c0 < 0 || r0 < 0 || c0 >= grid.Columns || r0 >= grid.Rows)
             return world.GlobalBounds.Min.Z;
+        if (world.NavGridCellSource?.TryGetCell(c0, r0, out var chunkCell) == true)
+            return chunkCell.ElevationZ;
         var cells = grid.Cells;
         if (cells is null || cells.Count < grid.Columns * grid.Rows)
             return world.GlobalBounds.Min.Z;

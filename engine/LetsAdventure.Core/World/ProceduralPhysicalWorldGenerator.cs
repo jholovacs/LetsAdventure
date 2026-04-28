@@ -1,8 +1,14 @@
+using System.Threading;
+using System.Threading.Tasks;
 using LetsAdventure.Core.Simulation;
 
 namespace LetsAdventure.Core.World;
 
-/// <summary>Authoring-time procedural terrain with hydrology and nav constraints.</summary>
+/// <summary>
+/// Authoring-time procedural terrain with hydrology and nav constraints.
+/// World axes X, Y (horizontal) and Z (up) use <b>SI meters</b>: one integer step in coordinates is 1 m
+/// (fractional values are meters). All lengths in this spec — cell size, slopes, channel widths, depths — are meters.
+/// </summary>
 public sealed class ProceduralWorldSpec
 {
     public double MinX { get; set; }
@@ -25,33 +31,27 @@ public sealed class ProceduralWorldSpec
     public double RiverChannelHalfWidthWorld { get; set; } = 7;
     public double LakeDepth { get; set; } = 3.5;
 
-    /// <summary>Horizontal XY unit vector pointing <b>downstream</b> (toward the lake).</summary>
+    /// <summary>Horizontal XY unit vector pointing <b>downstream</b> (prevailing drainage direction).</summary>
     public GeoVec2 FlowDirectionDownstream { get; set; } = new() { X = 1, Y = 0 };
 
     public double UphillPathPenalty { get; set; } = 38;
     public int SlopeRelaxationIterations { get; set; } = 32;
 
-    /// <summary>Depth carved below nominal terrain along the river bed (world units).</summary>
+    /// <summary>Depth carved below nominal terrain along the river bed (meters).</summary>
     public double RiverBedCarve { get; set; } = 1.8;
 
     public string GeneratedRegionId { get; set; } = "region.generated";
 
-    /// <summary>
-    /// When true, map edges are ocean with an irregular shoreline; rivers drain to the ocean and
-    /// <see cref="InteriorLakeCount"/> inland lakes may feed tributaries. When false, legacy single-lake sink.
-    /// </summary>
-    public bool UsePerimeterOcean { get; set; }
-
-    /// <summary>Added elevation at map center, tapering to 0 at edges (world Z units).</summary>
+    /// <summary>Added elevation at map center, tapering to 0 at edges (meters Z).</summary>
     public double ContinentalDomeAmplitude { get; set; } = 0;
 
-    /// <summary>Minimum strip width of ocean from each map edge (world units).</summary>
+    /// <summary>Minimum strip width of ocean from each map edge (meters).</summary>
     public double OceanBandMinWorld { get; set; } = 48;
 
     /// <summary>Extra ocean intrusion beyond min, shaped by noise (bays/coves).</summary>
     public double OceanBandVariationWorld { get; set; } = 36;
 
-    /// <summary>Seafloor below sea surface for ocean cells (world units).</summary>
+    /// <summary>Seafloor below sea surface for ocean cells (meters).</summary>
     public double OceanDepth { get; set; } = 6;
 
     /// <summary>Ridged / macro roughness as a fraction of <see cref="TerrainAmplitude"/>.</summary>
@@ -80,9 +80,6 @@ public sealed class ProceduralWorldSpec
 
     public int InteriorLakeCount { get; set; } = 1;
 
-    /// <summary>Deprecated for coastal worlds: use <see cref="MajorRiverCountMin"/> / <see cref="MajorRiverCountMax"/>.</summary>
-    public int MajorRiverCount { get; set; } = 1;
-
     /// <summary>Minimum major rivers (headwater → ocean or merge into an existing major stem).</summary>
     public int MajorRiverCountMin { get; set; } = 3;
 
@@ -98,7 +95,9 @@ public sealed class ProceduralWorldSpec
 
 public sealed class PhysicalWorldGenerationReport
 {
-    /// <summary>Legacy: river ends in lake. Coastal: major rivers that reached the ocean.</summary>
+    /// <summary>
+    /// Composite hydrology quality flag (major rivers, connectivity, lake–ocean paths, downstream profiles).
+    /// </summary>
     public bool RiverTerminatesInLakeRegion { get; set; }
 
     public int MajorRiversFormed { get; set; }
@@ -136,8 +135,55 @@ public sealed class PhysicalWorldGenerationResult
 
 public static class ProceduralPhysicalWorldGenerator
 {
+    /// <summary>Embarrassingly parallel grid work uses TPL at or above this cell count to avoid overhead on tiny grids.</summary>
+    private const int ParallelGridCellThreshold = 65_536;
+
+    private static bool ShouldParallelize(int cols, int rows) => (long)cols * rows >= ParallelGridCellThreshold;
+
+    /// <summary>Parallel over column index; inner loop is row (matches most <c>h[c,r]</c> passes).</summary>
+    private static void ParallelForCols(int cols, int rows, Action<int, int> body)
+    {
+        if (!ShouldParallelize(cols, rows))
+        {
+            for (var c = 0; c < cols; c++)
+            {
+                for (var r = 0; r < rows; r++)
+                    body(c, r);
+            }
+
+            return;
+        }
+
+        Parallel.For(0, cols, c =>
+        {
+            for (var r = 0; r < rows; r++)
+                body(c, r);
+        });
+    }
+
+    /// <summary>Parallel over row index (for code that scans row-outer).</summary>
+    private static void ParallelForRows(int cols, int rows, Action<int, int> body)
+    {
+        if (!ShouldParallelize(cols, rows))
+        {
+            for (var r = 0; r < rows; r++)
+            {
+                for (var c = 0; c < cols; c++)
+                    body(c, r);
+            }
+
+            return;
+        }
+
+        Parallel.For(0, rows, r =>
+        {
+            for (var c = 0; c < cols; c++)
+                body(c, r);
+        });
+    }
+
     public static PhysicalWorldGenerationResult Generate(ProceduralWorldSpec spec, IProgress<string>? progress = null) =>
-        spec.UsePerimeterOcean ? GenerateCoastalOceanDrainage(spec, progress) : GenerateLegacyDrainage(spec, progress);
+        GenerateCoastalOceanDrainage(spec, progress);
 
     private static void Report(IProgress<string>? progress, string message) => progress?.Report(message);
 
@@ -150,166 +196,6 @@ public static class ProceduralPhysicalWorldGenerator
         return rng.Next(lo, hi + 1);
     }
 
-    private static PhysicalWorldGenerationResult GenerateLegacyDrainage(ProceduralWorldSpec spec,
-        IProgress<string>? progress)
-    {
-        var report = new PhysicalWorldGenerationReport();
-        var messages = report.Messages;
-
-        var cell = Math.Max(0.5, spec.CellSize);
-        var cols = Math.Max(4, (int)Math.Floor((spec.MaxX - spec.MinX) / cell));
-        var rows = Math.Max(4, (int)Math.Floor((spec.MaxY - spec.MinY) / cell));
-        Report(progress,
-            $"[legacy drainage] Grid {cols}×{rows} cells, cell size {cell:F2} world units (~{cols * rows:N0} height samples).");
-
-        var down = NormalizeFlow(spec.FlowDirectionDownstream);
-        var perp = new GeoVec2 { X = -down.Y, Y = down.X };
-
-        var rng = new Random(spec.Seed);
-        Report(progress, "[legacy] Building base height field (FBM)…");
-        var h = BuildBaseHeights(cols, rows, spec, rng);
-        Report(progress, $"[legacy] Enforcing max orthogonal slope ({spec.SlopeRelaxationIterations} relaxation passes)…");
-        EnforceMaxOrthogonalSlope(h, cols, rows, spec.MaxLandStepOrthogonal, spec.SlopeRelaxationIterations);
-
-        var cx = 0.5 * (spec.MinX + spec.MaxX);
-        var cy = 0.5 * (spec.MinY + spec.MaxY);
-        var spanX = spec.MaxX - spec.MinX;
-        var spanY = spec.MaxY - spec.MinY;
-        var halfSpan = 0.5 * Math.Min(spanX, spanY);
-
-        var lakeWx = cx + down.X * (0.38 * halfSpan);
-        var lakeWy = cy + down.Y * (0.38 * halfSpan);
-        WorldToGrid(spec, cell, lakeWx, lakeWy, cols, rows, out var lc, out var lr);
-
-        var lakeRCells = Math.Max(2, (int)Math.Floor(spec.LakeRadiusWorld / cell));
-        Report(progress, "[legacy] Carving lake bowl and re-relaxing slopes…");
-        ApplyLakeBowl(h, cols, rows, lc, lr, lakeRCells, spec.TerrainAmplitude * 0.35);
-
-        EnforceMaxOrthogonalSlope(h, cols, rows, spec.MaxLandStepOrthogonal, spec.SlopeRelaxationIterations / 2);
-
-        var jitter = (rng.NextDouble() - 0.5) * 0.12 * halfSpan;
-        var upWx = cx - down.X * (0.42 * halfSpan) + perp.X * jitter;
-        var upWy = cy - down.Y * (0.42 * halfSpan) + perp.Y * jitter;
-        WorldToGrid(spec, cell, upWx, upWy, cols, rows, out var uc, out var ur);
-        uc = Clamp(uc, 1, cols - 2);
-        ur = Clamp(ur, 1, rows - 2);
-
-        Report(progress, "[legacy] Searching least-cost river path (8-connected, uphill penalty)…");
-        var path = FindRiverPath(h, cols, rows, (uc, ur), (lc, lr), lakeRCells, spec.UphillPathPenalty, cell);
-        if (path.Count < 2)
-        {
-            path = StraightLinePath((uc, ur), (lc, lr));
-            messages.Add("River path search fell back to a straight polyline; check slope and bounds.");
-        }
-
-        Report(progress, $"[legacy] River path has {path.Count} vertices; stamping corridor and carving beds…");
-
-        var last = path[^1];
-        var distLast = Math.Sqrt((last.c - lc) * (last.c - lc) + (last.r - lr) * (last.r - lr));
-        report.RiverTerminatesInLakeRegion = distLast <= lakeRCells + 0.5;
-        if (!report.RiverTerminatesInLakeRegion)
-            messages.Add("River path end is not inside the lake disk; widen lake radius or adjust flow.");
-
-        var riverHalfCells = Math.Max(1, (int)Math.Floor(spec.RiverChannelHalfWidthWorld / cell));
-        var isLake = new bool[cols, rows];
-        var isRiver = new bool[cols, rows];
-        for (var c = 0; c < cols; c++)
-        {
-            for (var r = 0; r < rows; r++)
-            {
-                if (LakeDistance(c, r, lc, lr) <= lakeRCells)
-                    isLake[c, r] = true;
-            }
-        }
-
-        StampRiverCorridor(path, riverHalfCells, cols, rows, isLake, isRiver);
-
-        var ringZ = new List<double>();
-        for (var c = 0; c < cols; c++)
-        {
-            for (var r = 0; r < rows; r++)
-            {
-                if (!isLake[c, r]) continue;
-                var d = LakeDistance(c, r, lc, lr);
-                if (d >= lakeRCells - 1 && d <= lakeRCells + 0.5)
-                    ringZ.Add(h[c, r]);
-            }
-        }
-
-        var lakeWaterZ = ringZ.Count > 0
-            ? ringZ.Average() - 0.35
-            : h[lc, lr] + 1;
-
-        CarveLakeBed(h, cols, rows, isLake, lakeWaterZ, spec.LakeDepth);
-        CarveRiverBed(h, path, isRiver, lakeWaterZ, spec.RiverBedCarve, cell, spec);
-
-        var bedBeforeSurfaces = (double[,])h.Clone();
-        Report(progress, "[legacy] Finalizing water surface Z along lake and river…");
-        FinalizeWaterSurfaceHeights(h, cols, rows, isLake, isRiver, lakeWaterZ, path, cell, spec);
-
-        var isWater = new bool[cols, rows];
-        for (var c = 0; c < cols; c++)
-            for (var r = 0; r < rows; r++)
-                isWater[c, r] = isLake[c, r] || isRiver[c, r];
-
-        Report(progress, "[legacy] Enforcing land slopes around water and biasing river valleys…");
-        EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 22);
-
-        var landNearRiver = new bool[cols, rows];
-        ApplyRiverValleyLandBias(h, isWater, path, cols, rows, spec, landNearRiver);
-        EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 16);
-
-        var isOceanLegacy = new bool[cols, rows];
-        Report(progress, "[legacy] Validating water 4-connectivity…");
-        ValidateWaterNetwork(isRiver, isLake, isOceanLegacy, cols, rows, report);
-        if (!report.AllFlowingCellsReachStandingWater)
-            messages.Add("Some river cells are not 4-connected to standing water; widen channel or lake.");
-
-        Report(progress, "[legacy] Building navigation grid (walkability, bed vs surface Z, composition)…");
-        var grid = BuildNavGrid(spec, cols, rows, cell, h, bedBeforeSurfaces, isWater, spec.MaxLandStepOrthogonal,
-            report, landNearRiver, null);
-
-        Report(progress, "[legacy] Done.");
-        var world = new PhysicalWorldDefinition
-        {
-            SchemaVersion = 1,
-            CoordinateDescription = "X/Y horizontal plane, Z vertical (up). Procedurally generated.",
-            GlobalBounds = new AxisAlignedBounds
-            {
-                Min = new Vec3 { X = spec.MinX, Y = spec.MinY, Z = spec.MinZBound },
-                Max = new Vec3 { X = spec.MaxX, Y = spec.MaxY, Z = spec.MaxZBound },
-            },
-            RegionBoundaries =
-            [
-                new RegionBoundaryEntry
-                {
-                    LoreRegionId = spec.GeneratedRegionId,
-                    Boundary = new PolygonColumnBounds
-                    {
-                        ZMin = spec.MinZBound,
-                        ZMax = spec.MaxZBound,
-                        Vertices =
-                        [
-                            new GeoVec2 { X = spec.MinX, Y = spec.MinY },
-                            new GeoVec2 { X = spec.MaxX, Y = spec.MinY },
-                            new GeoVec2 { X = spec.MaxX, Y = spec.MaxY },
-                            new GeoVec2 { X = spec.MinX, Y = spec.MaxY },
-                        ],
-                    },
-                },
-            ],
-            Territories = [],
-            Features = BuildFeatures(spec, path, cell, lakeWx, lakeWy, lakeRCells * cell, lakeWaterZ, down),
-            Navigation = new NavigationBundle
-            {
-                Graph = new NavigationGraphDefinition(),
-                Grid = grid,
-            },
-        };
-
-        return new PhysicalWorldGenerationResult { World = world, Report = report };
-    }
-
     private static PhysicalWorldGenerationResult GenerateCoastalOceanDrainage(ProceduralWorldSpec spec,
         IProgress<string>? progress)
     {
@@ -320,8 +206,12 @@ public static class ProceduralPhysicalWorldGenerator
         var cols = Math.Max(4, (int)Math.Floor((spec.MaxX - spec.MinX) / cell));
         var rows = Math.Max(4, (int)Math.Floor((spec.MaxY - spec.MinY) / cell));
         var rng = new Random(spec.Seed);
+        var spanX = spec.MaxX - spec.MinX;
+        var spanY = spec.MaxY - spec.MinY;
         Report(progress,
-            $"[coastal] Phase 1 — land: grid {cols}×{rows} (~{cols * rows:N0} cells), cell {cell:F2} world units.");
+            $"[coastal] Phase 1 — land: nav/hydrology sampling grid {cols}×{rows} (~{cols * rows:N0} cells) across entire world XY span ({spanX:F0} × {spanY:F0} world units); each cell is ~{cell:F0} world units — resolution, not “map size”.");
+        if (ShouldParallelize(cols, rows))
+            Report(progress, "[coastal] Height-field synthesis uses multithreaded grid passes where safe (slope relaxation & graph search stay single-threaded).");
 
         // --- Phase 1: land only (ruggedness, mountains, gentle trail slopes elsewhere) ---
         Report(progress, "[coastal] Base FBM heights + continental dome…");
@@ -403,7 +293,7 @@ public static class ProceduralPhysicalWorldGenerator
             CarveLakeBedForId(h, cols, rows, lakeId, kv.Key, kv.Value, spec.LakeDepth);
 
         foreach (var path in riverPaths)
-            CarveRiverBed(h, path, isRiver, oceanWaterZ, spec.RiverBedCarve, cell, spec);
+            CarveRiverBed(h, path, isRiver, oceanWaterZ, spec.RiverBedCarve, spec);
 
         var bedBeforeSurfaces = (double[,])h.Clone();
         Report(progress, "[coastal] Finalizing ocean / lake / river water surfaces…");
@@ -416,18 +306,23 @@ public static class ProceduralPhysicalWorldGenerator
                 isWater[c, r] = isOcean[c, r] || isLake[c, r] || isRiver[c, r];
 
         Report(progress, "[coastal] Land slope enforcement + river valley bias (all main stems)…");
-        EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 24);
+        EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 24, progress,
+            "[coastal] Land-only slope before river valleys");
         var landNearRiver = new bool[cols, rows];
         var valleyScratch = new bool[cols, rows];
-        foreach (var path in riverPaths)
+        var stemTotal = riverPaths.Count;
+        for (var si = 0; si < stemTotal; si++)
         {
-            ApplyRiverValleyLandBias(h, isWater, path, cols, rows, spec, valleyScratch);
+            var path = riverPaths[si];
+            ApplyRiverValleyLandBias(h, isWater, path, cols, rows, spec, valleyScratch, progress,
+                $"[coastal] River valley bias stem {si + 1}/{stemTotal}");
             for (var c = 0; c < cols; c++)
                 for (var r = 0; r < rows; r++)
                     landNearRiver[c, r] |= valleyScratch[c, r];
         }
 
-        EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 18);
+        EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 18, progress,
+            "[coastal] Land-only slope after river valleys");
         var freezePostWater = new bool[cols, rows];
         for (var c = 0; c < cols; c++)
         {
@@ -439,8 +334,7 @@ public static class ProceduralPhysicalWorldGenerator
         SmoothMaskedHeightField(h, freezePostWater, cols, rows, passes: 8, alpha: 0.22);
 
         Report(progress, "[coastal] Water network validation (ocean drainage + river profiles)…");
-        ValidateWaterNetwork(isRiver, isLake, isOcean, cols, rows, report, coastalExpectOceanReachability: true, h,
-            riverPaths, cell, spec.TerrainAmplitude);
+        ValidateWaterNetwork(isRiver, isLake, isOcean, cols, rows, report, h, riverPaths, cell, spec.TerrainAmplitude);
         report.RiverTerminatesInLakeRegion = report.AllFlowingCellsReachStandingWater
                                               && report.MajorRiversFormed > 0
                                               && report.LakeBasinDisconnectedFromOceanCells == 0
@@ -463,7 +357,8 @@ public static class ProceduralPhysicalWorldGenerator
         var world = new PhysicalWorldDefinition
         {
             SchemaVersion = 1,
-            CoordinateDescription = "X/Y horizontal plane, Z vertical (up). Procedurally generated (coastal ocean).",
+            CoordinateDescription =
+                "X/Y horizontal plane, Z vertical (up). 1 unit = 1 m (SI). Procedurally generated (coastal ocean).",
             GlobalBounds = new AxisAlignedBounds
             {
                 Min = new Vec3 { X = spec.MinX, Y = spec.MinY, Z = spec.MinZBound },
@@ -501,80 +396,6 @@ public static class ProceduralPhysicalWorldGenerator
         return new PhysicalWorldGenerationResult { World = world, Report = report };
     }
 
-    private static List<PhysicalTerrainFeature> BuildFeatures(
-        ProceduralWorldSpec spec,
-        List<(int c, int r)> path,
-        double cell,
-        double lakeWx,
-        double lakeWy,
-        double lakeRadiusWorld,
-        double lakeWaterZ,
-        GeoVec2 down)
-    {
-        var features = new List<PhysicalTerrainFeature>();
-        var line = new List<GeoVec2>();
-        var step = Math.Max(1, path.Count / 48);
-        for (var i = 0; i < path.Count; i += step)
-        {
-            var (c, r) = path[i];
-            var wx = spec.MinX + (c + 0.5) * cell;
-            var wy = spec.MinY + (r + 0.5) * cell;
-            line.Add(new GeoVec2 { X = wx, Y = wy });
-        }
-
-        var last = path[^1];
-        var lwx = spec.MinX + (last.c + 0.5) * cell;
-        var lwy = spec.MinY + (last.r + 0.5) * cell;
-        if (line.Count == 0 || Math.Abs(line[^1].X - lwx) > 1e-3 || Math.Abs(line[^1].Y - lwy) > 1e-3)
-            line.Add(new GeoVec2 { X = lwx, Y = lwy });
-
-        GeoVec2 flowDir;
-        if (line.Count >= 2)
-        {
-            var a = line[^2];
-            var b = line[^1];
-            flowDir = NormalizeFlow(new GeoVec2 { X = b.X - a.X, Y = b.Y - a.Y });
-        }
-        else
-            flowDir = down;
-
-        features.Add(new FlowingWaterFeature
-        {
-            Id = "feat.gen.river",
-            LayerPriority = 4,
-            ChannelCenterline = line,
-            ChannelHalfWidth = spec.RiverChannelHalfWidthWorld,
-            WaterSurfaceZ = lakeWaterZ + 0.2,
-            FlowDirection = flowDir,
-            Medium = PhysicalMedium.FluidFlowing,
-        });
-
-        var shore = CirclePolygon(lakeWx, lakeWy, Math.Max(spec.LakeRadiusWorld * 0.92, cell * 3), segments: 28);
-        features.Add(new StandingWaterFeature
-        {
-            Id = "feat.gen.lake",
-            LayerPriority = 3,
-            Shoreline = shore,
-            WaterSurfaceZ = lakeWaterZ,
-            Depth = spec.LakeDepth,
-            Medium = PhysicalMedium.FluidStanding,
-        });
-
-        return features;
-    }
-
-    private static List<GeoVec2> CirclePolygon(double cx, double cy, double radius, int segments)
-    {
-        var list = new List<GeoVec2>(segments);
-        for (var i = 0; i < segments; i++)
-        {
-            var t = 2 * Math.PI * i / segments;
-            list.Add(new GeoVec2 { X = cx + radius * Math.Cos(t), Y = cy + radius * Math.Sin(t) });
-        }
-
-        return list;
-    }
-
     private static void ApplyRiverValleyLandBias(
         double[,] h,
         bool[,] isWater,
@@ -582,22 +403,28 @@ public static class ProceduralPhysicalWorldGenerator
         int cols,
         int rows,
         ProceduralWorldSpec spec,
-        bool[,] landNearRiver)
+        bool[,] landNearRiver,
+        IProgress<string>? progress = null,
+        string progressPrefix = "")
     {
-        for (var c = 0; c < cols; c++)
+        if (ShouldParallelize(cols, rows))
+            ParallelForCols(cols, rows, (c, r) => landNearRiver[c, r] = false);
+        else
         {
-            for (var r = 0; r < rows; r++)
-                landNearRiver[c, r] = false;
+            for (var c = 0; c < cols; c++)
+            {
+                for (var r = 0; r < rows; r++)
+                    landNearRiver[c, r] = false;
+            }
         }
 
         if (path.Count < 2)
             return;
 
         var cell = spec.CellSize;
-        var coastal = spec.UsePerimeterOcean;
-        var influence = Math.Max(spec.RiverChannelHalfWidthWorld * (coastal ? 9.5 : 5.5), cell * (coastal ? 18 : 10));
-        var sigma = Math.Max(influence * (coastal ? 0.68 : 0.42), cell * (coastal ? 6.5 : 2));
-        var amplitude = spec.TerrainAmplitude * (coastal ? 0.022 : 0.11) + spec.RiverBedCarve * (coastal ? 0.065 : 0.4);
+        var influence = Math.Max(spec.RiverChannelHalfWidthWorld * 9.5, cell * 18);
+        var sigma = Math.Max(influence * 0.68, cell * 6.5);
+        var amplitude = spec.TerrainAmplitude * 0.022 + spec.RiverBedCarve * 0.065;
         if (amplitude < 1e-6)
             return;
 
@@ -614,7 +441,15 @@ public static class ProceduralPhysicalWorldGenerator
         if (totalLen < 1e-6)
             return;
 
-        for (var c = 0; c < cols; c++)
+        var segCount = path.Count - 1;
+        var colReportStep = cols >= 384 ? Math.Max(1, cols / 12) : Math.Max(1, cols / 4);
+        var reportPrefix = !string.IsNullOrEmpty(progressPrefix);
+        var parallelSweep = ShouldParallelize(cols, rows);
+        if (progress != null && reportPrefix)
+            Report(progress,
+                $"{progressPrefix}: scanning land columns for path distance ({segCount} segments, {rows} rows/column{(parallelSweep ? "; multithreaded" : "")})…");
+
+        void ProcessColumn(int c)
         {
             for (var r = 0; r < rows; r++)
             {
@@ -635,6 +470,35 @@ public static class ProceduralPhysicalWorldGenerator
                     landNearRiver[c, r] = true;
             }
         }
+
+        if (parallelSweep)
+        {
+            var finishedCols = 0;
+            Parallel.For(0, cols, c =>
+            {
+                ProcessColumn(c);
+                if (progress != null && reportPrefix)
+                {
+                    var v = Interlocked.Increment(ref finishedCols);
+                    if (v == 1 || v == cols || v % colReportStep == 0)
+                        Report(progress, $"{progressPrefix}: finished {v}/{cols} columns…");
+                }
+            });
+        }
+        else
+        {
+            for (var c = 0; c < cols; c++)
+            {
+                if (progress != null && reportPrefix &&
+                    (c == 0 || c == cols - 1 || (c + 1) % colReportStep == 0))
+                    Report(progress, $"{progressPrefix}: columns {c + 1}/{cols}…");
+
+                ProcessColumn(c);
+            }
+        }
+
+        if (progress != null && reportPrefix)
+            Report(progress, $"{progressPrefix}: column sweep done.");
     }
 
     private static void ClosestPointOnRiverPath(
@@ -704,30 +568,27 @@ public static class ProceduralPhysicalWorldGenerator
         for (var p = 0; p < passes; p++)
         {
             var copy = (double[,])h.Clone();
-            for (var c = 0; c < cols; c++)
+            ParallelForCols(cols, rows, (c, r) =>
             {
-                for (var r = 0; r < rows; r++)
+                if (freeze[c, r])
+                    return;
+                double s = 0;
+                var n = 0;
+                foreach (var (dc, dr) in orth)
                 {
-                    if (freeze[c, r])
+                    var nc = c + dc;
+                    var nr = r + dr;
+                    if ((uint)nc >= (uint)cols || (uint)nr >= (uint)rows)
                         continue;
-                    double s = 0;
-                    var n = 0;
-                    foreach (var (dc, dr) in orth)
-                    {
-                        var nc = c + dc;
-                        var nr = r + dr;
-                        if ((uint)nc >= (uint)cols || (uint)nr >= (uint)rows)
-                            continue;
-                        s += copy[nc, nr];
-                        n++;
-                    }
-
-                    if (n == 0)
-                        continue;
-                    var avg = s / n;
-                    h[c, r] = (1 - alpha) * copy[c, r] + alpha * avg;
+                    s += copy[nc, nr];
+                    n++;
                 }
-            }
+
+                if (n == 0)
+                    return;
+                var avg = s / n;
+                h[c, r] = (1 - alpha) * copy[c, r] + alpha * avg;
+            });
         }
     }
 
@@ -749,23 +610,20 @@ public static class ProceduralPhysicalWorldGenerator
         var violations = 0;
         var orthDirs = new[] { (1, 0), (-1, 0), (0, 1), (0, -1) };
         var dryGrad = new double[cols, rows];
-        for (var r = 0; r < rows; r++)
+        ParallelForRows(cols, rows, (c, r) =>
         {
-            for (var c = 0; c < cols; c++)
+            var gDry = 0.0;
+            foreach (var (dc, dr) in orthDirs)
             {
-                var gDry = 0.0;
-                foreach (var (dc, dr) in orthDirs)
-                {
-                    var nc = c + dc;
-                    var nr = r + dr;
-                    if ((uint)nc >= (uint)cols || (uint)nr >= (uint)rows || isWater[nc, nr])
-                        continue;
-                    gDry = Math.Max(gDry, Math.Abs(h[c, r] - h[nc, nr]));
-                }
-
-                dryGrad[c, r] = gDry;
+                var nc = c + dc;
+                var nr = r + dr;
+                if ((uint)nc >= (uint)cols || (uint)nr >= (uint)rows || isWater[nc, nr])
+                    continue;
+                gDry = Math.Max(gDry, Math.Abs(h[c, r] - h[nc, nr]));
             }
-        }
+
+            dryGrad[c, r] = gDry;
+        });
 
         var maxWalk = spec.MaxWalkableOrthogonalStep > 1e-6
             ? spec.MaxWalkableOrthogonalStep
@@ -889,10 +747,6 @@ public static class ProceduralPhysicalWorldGenerator
         };
     }
 
-    /// <param name="coastalExpectOceanReachability">
-    /// When true, every river cell must lie in a 4-connected water body that includes the ocean; every lake cell must
-    /// also reach the ocean through water. Legacy drainage uses false (lake or ocean counts as a sink for rivers).
-    /// </param>
     /// <param name="flowSurfaceHeights">Finalized water surface / terrain Z; used for downstream gradient checks.</param>
     /// <param name="riverCenterlines">River paths ordered headwater → mouth (or merge); used for gradient checks.</param>
     private static void ValidateWaterNetwork(
@@ -902,7 +756,6 @@ public static class ProceduralPhysicalWorldGenerator
         int cols,
         int rows,
         PhysicalWorldGenerationReport report,
-        bool coastalExpectOceanReachability = false,
         double[,]? flowSurfaceHeights = null,
         List<List<(int c, int r)>>? riverCenterlines = null,
         double cellSize = 1,
@@ -921,8 +774,6 @@ public static class ProceduralPhysicalWorldGenerator
             for (var r = 0; r < rows; r++)
                 comp[c, r] = -1;
 
-        var compHasRiver = new List<bool>();
-        var compHasLake = new List<bool>();
         var compHasOcean = new List<bool>();
         var q = new Queue<(int c, int r)>();
 
@@ -932,19 +783,13 @@ public static class ProceduralPhysicalWorldGenerator
             {
                 if (!water[c, r] || comp[c, r] >= 0)
                     continue;
-                var id = compHasRiver.Count;
-                compHasRiver.Add(false);
-                compHasLake.Add(false);
+                var id = compHasOcean.Count;
                 compHasOcean.Add(false);
                 q.Enqueue((c, r));
                 comp[c, r] = id;
                 while (q.Count > 0)
                 {
                     var (u, v) = q.Dequeue();
-                    if (isRiver[u, v])
-                        compHasRiver[id] = true;
-                    if (isLake[u, v])
-                        compHasLake[id] = true;
                     if (isOcean[u, v])
                         compHasOcean[id] = true;
                     foreach (var (dc, dr) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
@@ -976,10 +821,7 @@ public static class ProceduralPhysicalWorldGenerator
                     continue;
                 }
 
-                var ok = coastalExpectOceanReachability
-                    ? compHasOcean[id]
-                    : compHasLake[id] || compHasOcean[id];
-                if (!ok)
+                if (!compHasOcean[id])
                     failures++;
             }
         }
@@ -987,23 +829,20 @@ public static class ProceduralPhysicalWorldGenerator
         report.WaterConnectivityFailures = failures;
         report.AllFlowingCellsReachStandingWater = failures == 0;
 
-        if (coastalExpectOceanReachability)
+        var lakeIssues = 0;
+        for (var c = 0; c < cols; c++)
         {
-            var lakeIssues = 0;
-            for (var c = 0; c < cols; c++)
+            for (var r = 0; r < rows; r++)
             {
-                for (var r = 0; r < rows; r++)
-                {
-                    if (!isLake[c, r])
-                        continue;
-                    var id = comp[c, r];
-                    if (id < 0 || !compHasOcean[id])
-                        lakeIssues++;
-                }
+                if (!isLake[c, r])
+                    continue;
+                var id = comp[c, r];
+                if (id < 0 || !compHasOcean[id])
+                    lakeIssues++;
             }
-
-            report.LakeBasinDisconnectedFromOceanCells = lakeIssues;
         }
+
+        report.LakeBasinDisconnectedFromOceanCells = lakeIssues;
 
         if (riverCenterlines is { Count: > 0 } && flowSurfaceHeights is not null)
         {
@@ -1034,86 +873,21 @@ public static class ProceduralPhysicalWorldGenerator
         }
     }
 
-    private static void FinalizeWaterSurfaceHeights(
-        double[,] h,
-        int cols,
-        int rows,
-        bool[,] isLake,
-        bool[,] isRiver,
-        double lakeWaterZ,
-        List<(int c, int r)> path,
-        double cell,
-        ProceduralWorldSpec spec)
-    {
-        for (var c = 0; c < cols; c++)
-        {
-            for (var r = 0; r < rows; r++)
-            {
-                if (isLake[c, r])
-                    h[c, r] = lakeWaterZ;
-            }
-        }
-
-        for (var i = 0; i < path.Count; i++)
-        {
-            var t = path.Count > 1 ? i / (double)(path.Count - 1) : 1;
-            var zSurf = lakeWaterZ + (1 - t) * Math.Max(0.4, spec.TerrainAmplitude * 0.06);
-            var (c, r) = path[i];
-            if (isRiver[c, r])
-                h[c, r] = zSurf;
-        }
-
-        for (var c = 0; c < cols; c++)
-        {
-            for (var r = 0; r < rows; r++)
-            {
-                if (!isRiver[c, r] || isLake[c, r])
-                    continue;
-                for (var dc = -1; dc <= 1; dc++)
-                {
-                    for (var dr = -1; dr <= 1; dr++)
-                    {
-                        var nc = c + dc;
-                        var nr = r + dr;
-                        if ((uint)nc >= (uint)cols || (uint)nr >= (uint)rows)
-                            continue;
-                        if (isRiver[nc, nr] && h[nc, nr] > h[c, r] - 0.01)
-                            h[nc, nr] = Math.Min(h[nc, nr], h[c, r] - 0.02);
-                    }
-                }
-            }
-        }
-    }
-
     private static void CarveRiverBed(
         double[,] h,
         List<(int c, int r)> path,
         bool[,] isRiver,
         double lakeWaterZ,
         double carve,
-        double cell,
         ProceduralWorldSpec spec)
     {
-        var effCarve = spec.UsePerimeterOcean ? carve * 0.55 : carve;
+        var effCarve = carve * 0.55;
         for (var i = 0; i < path.Count; i++)
         {
             var t = path.Count > 1 ? i / (double)(path.Count - 1) : 0;
-            var target = lakeWaterZ + (1 - t) * spec.TerrainAmplitude * (spec.UsePerimeterOcean ? 0.32 : 0.45)
-                         - effCarve;
+            var target = lakeWaterZ + (1 - t) * spec.TerrainAmplitude * 0.32 - effCarve;
             var (c, r) = path[i];
             h[c, r] = Math.Min(h[c, r], target);
-        }
-    }
-
-    private static void CarveLakeBed(double[,] h, int cols, int rows, bool[,] isLake, double lakeWaterZ, double depth)
-    {
-        for (var c = 0; c < cols; c++)
-        {
-            for (var r = 0; r < rows; r++)
-            {
-                if (isLake[c, r])
-                    h[c, r] = Math.Min(h[c, r], lakeWaterZ - depth);
-            }
         }
     }
 
@@ -1158,101 +932,21 @@ public static class ProceduralPhysicalWorldGenerator
         return list;
     }
 
-    private static List<(int c, int r)> FindRiverPath(
-        double[,] h,
-        int cols,
-        int rows,
-        (int c, int r) start,
-        (int lc, int lr) lakeCenter,
-        int lakeRCells,
-        double uphillPenalty,
-        double cellSize)
-    {
-        var dist = new double[cols, rows];
-        var parent = new (int c, int r)[cols, rows];
-        for (var c = 0; c < cols; c++)
-            for (var r = 0; r < rows; r++)
-                dist[c, r] = double.PositiveInfinity;
-
-        dist[start.c, start.r] = 0;
-        parent[start.c, start.r] = (-1, -1);
-        var pq = new PriorityQueue<(int c, int r), double>();
-        pq.Enqueue(start, 0);
-
-        (int c, int r)? goal = null;
-        while (pq.TryDequeue(out var u, out var du))
-        {
-            if (du > dist[u.c, u.r] + 1e-9)
-                continue;
-            if (LakeDistance(u.c, u.r, lakeCenter.lc, lakeCenter.lr) <= lakeRCells)
-            {
-                goal = u;
-                break;
-            }
-
-            for (var d = 0; d < 8; d++)
-            {
-                var dc = d % 3 - 1;
-                var dr = d / 3 - 1;
-                if (dc == 0 && dr == 0)
-                    continue;
-                var vc = u.c + dc;
-                var vr = u.r + dr;
-                if ((uint)vc >= (uint)cols || (uint)vr >= (uint)rows)
-                    continue;
-
-                var step = Math.Abs(dc) + Math.Abs(dr) == 2 ? Math.Sqrt(2) : 1.0;
-                var dh = h[vc, vr] - h[u.c, u.r];
-                var edge = step * cellSize * (1 + Math.Max(0, dh) * uphillPenalty + Math.Max(0, -dh) * 0.04);
-                var alt = du + edge;
-                if (alt < dist[vc, vr])
-                {
-                    dist[vc, vr] = alt;
-                    parent[vc, vr] = u;
-                    pq.Enqueue((vc, vr), alt);
-                }
-            }
-        }
-
-        if (goal is null)
-            return [];
-
-        var path = new List<(int c, int r)>();
-        var cur = goal.Value;
-        while (cur.c >= 0)
-        {
-            path.Add(cur);
-            var p = parent[cur.c, cur.r];
-            if (p.c < 0)
-                break;
-            cur = p;
-        }
-
-        path.Reverse();
-        return path;
-    }
-
-    private static void ApplyLakeBowl(double[,] h, int cols, int rows, int lc, int lr, int radiusCells, double drop)
-    {
-        for (var c = 0; c < cols; c++)
-        {
-            for (var r = 0; r < rows; r++)
-            {
-                var d = LakeDistance(c, r, lc, lr);
-                if (d > radiusCells + 2)
-                    continue;
-                var t = 1 - Math.Clamp(d / Math.Max(1, radiusCells), 0, 1);
-                var w = t * t * (3 - 2 * t);
-                h[c, r] -= drop * w;
-            }
-        }
-    }
-
     private static double LakeDistance(int c, int r, int lc, int lr) => Math.Sqrt((c - lc) * (c - lc) + (r - lr) * (r - lr));
 
-    private static void EnforceLandOnlySlope(double[,] h, bool[,] isWater, int cols, int rows, double maxStep, int iterations)
+    /// <param name="progressLabel">When set with <paramref name="progress"/>, reports pass progress (e.g. "[coastal] Land-only slope (pre-valley").</param>
+    private static void EnforceLandOnlySlope(
+        double[,] h,
+        bool[,] isWater,
+        int cols,
+        int rows,
+        double maxStep,
+        int iterations,
+        IProgress<string>? progress = null,
+        string? progressLabel = null)
     {
         var dirs = new[] { (1, 0), (-1, 0), (0, 1), (0, -1) };
+        var reportEvery = iterations <= 8 ? 1 : Math.Max(1, iterations / 5);
         for (var it = 0; it < iterations; it++)
         {
             for (var c = 0; c < cols; c++)
@@ -1283,6 +977,10 @@ public static class ProceduralPhysicalWorldGenerator
                     }
                 }
             }
+
+            if (progress != null && progressLabel != null &&
+                (it == 0 || it == iterations - 1 || (it + 1) % reportEvery == 0))
+                Report(progress, $"{progressLabel}: relax {it + 1}/{iterations}…");
         }
     }
 
@@ -1329,17 +1027,14 @@ public static class ProceduralPhysicalWorldGenerator
     {
         var h = new double[cols, rows];
         var seed = spec.Seed ^ (rng.Next() << 1);
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                var nx = c / (double)Math.Max(cols - 1, 1);
-                var ny = r / (double)Math.Max(rows - 1, 1);
-                var z = Fbm(nx * 3.1, ny * 3.1, spec.NoiseOctaves, seed) * spec.TerrainAmplitude;
-                z += 0.24 * spec.TerrainAmplitude * Math.Sin(nx * Math.PI) * Math.Sin(ny * Math.PI);
-                h[c, r] = z;
-            }
-        }
+            var nx = c / (double)Math.Max(cols - 1, 1);
+            var ny = r / (double)Math.Max(rows - 1, 1);
+            var z = Fbm(nx * 3.1, ny * 3.1, spec.NoiseOctaves, seed) * spec.TerrainAmplitude;
+            z += 0.24 * spec.TerrainAmplitude * Math.Sin(nx * Math.PI) * Math.Sin(ny * Math.PI);
+            h[c, r] = z;
+        });
 
         return h;
     }
@@ -1447,26 +1142,23 @@ public static class ProceduralPhysicalWorldGenerator
 
         var hRef = edgeZ.Count > 0 ? edgeZ.Average() : 0;
         var amp = Math.Max(spec.TerrainAmplitude, 60);
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                var wx = spec.MinX + (c + 0.5) * cell;
-                var wy = spec.MinY + (r + 0.5) * cell;
-                var dEdge = DistanceToMapEdgeWorld(wx, wy, spec);
-                var nx = (wx - spec.MinX) / spanX;
-                var ny = (wy - spec.MinY) / spanY;
-                var fine = (SmoothNoise(nx * 6.2, ny * 6.2, seed) - 0.5) * 2.0;
-                var bay = (SmoothNoise(nx * 2.05 + 0.3, ny * 2.05 - 0.2, seed + 911) - 0.5) * 2.0;
-                var cove = (SmoothNoise(nx * 11.0, ny * 11.0, seed + 413) - 0.5) * 0.65;
-                var threshold = spec.OceanBandMinWorld
-                    + spec.OceanBandVariationWorld * (0.45 * fine + 0.42 * bay + 0.28 * cove);
-                var hRel = (h[c, r] - hRef) / amp;
-                threshold -= hRel * spec.OceanBandVariationWorld * 0.38;
-                threshold = Math.Max(cell * 0.35, threshold);
-                mask[c, r] = dEdge < threshold;
-            }
-        }
+            var wx = spec.MinX + (c + 0.5) * cell;
+            var wy = spec.MinY + (r + 0.5) * cell;
+            var dEdge = DistanceToMapEdgeWorld(wx, wy, spec);
+            var nx = (wx - spec.MinX) / spanX;
+            var ny = (wy - spec.MinY) / spanY;
+            var fine = (SmoothNoise(nx * 6.2, ny * 6.2, seed) - 0.5) * 2.0;
+            var bay = (SmoothNoise(nx * 2.05 + 0.3, ny * 2.05 - 0.2, seed + 911) - 0.5) * 2.0;
+            var cove = (SmoothNoise(nx * 11.0, ny * 11.0, seed + 413) - 0.5) * 0.65;
+            var threshold = spec.OceanBandMinWorld
+                + spec.OceanBandVariationWorld * (0.45 * fine + 0.42 * bay + 0.28 * cove);
+            var hRel = (h[c, r] - hRef) / amp;
+            threshold -= hRel * spec.OceanBandVariationWorld * 0.38;
+            threshold = Math.Max(cell * 0.35, threshold);
+            mask[c, r] = dEdge < threshold;
+        });
 
         return mask;
     }
@@ -1529,18 +1221,15 @@ public static class ProceduralPhysicalWorldGenerator
         var cx = (cols - 1) * 0.5;
         var cy = (rows - 1) * 0.5;
         var maxR = Math.Sqrt(Math.Max(cx * cx + cy * cy, 1e-6));
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                var dx = (c + 0.5) - cx;
-                var dy = (r + 0.5) - cy;
-                var rd = Math.Sqrt(dx * dx + dy * dy) / maxR;
-                var t = 1.0 - Math.Clamp(rd, 0, 1);
-                var lift = spec.ContinentalDomeAmplitude * t * t * (1.0 + 0.35 * t);
-                h[c, r] += lift;
-            }
-        }
+            var dx = (c + 0.5) - cx;
+            var dy = (r + 0.5) - cy;
+            var rd = Math.Sqrt(dx * dx + dy * dy) / maxR;
+            var t = 1.0 - Math.Clamp(rd, 0, 1);
+            var lift = spec.ContinentalDomeAmplitude * t * t * (1.0 + 0.35 * t);
+            h[c, r] += lift;
+        });
     }
 
     private static void ApplyTerrainRidges(double[,] h, int cols, int rows, ProceduralWorldSpec spec, Random rng)
@@ -1548,17 +1237,14 @@ public static class ProceduralPhysicalWorldGenerator
         if (spec.TerrainRidgeWeight <= 1e-6)
             return;
         var seed = spec.Seed ^ rng.Next();
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                var nx = c / (double)Math.Max(cols - 1, 1);
-                var ny = r / (double)Math.Max(rows - 1, 1);
-                var n0 = SmoothNoise(nx * 5.1, ny * 5.1, seed);
-                var ridge = 1.0 - Math.Abs(n0 * 2.0 - 1.0);
-                h[c, r] += spec.TerrainAmplitude * spec.TerrainRidgeWeight * ridge;
-            }
-        }
+            var nx = c / (double)Math.Max(cols - 1, 1);
+            var ny = r / (double)Math.Max(rows - 1, 1);
+            var n0 = SmoothNoise(nx * 5.1, ny * 5.1, seed);
+            var ridge = 1.0 - Math.Abs(n0 * 2.0 - 1.0);
+            h[c, r] += spec.TerrainAmplitude * spec.TerrainRidgeWeight * ridge;
+        });
     }
 
     /// <summary>
@@ -1575,37 +1261,31 @@ public static class ProceduralPhysicalWorldGenerator
         Random rng)
     {
         var seed = spec.Seed ^ rng.Next();
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                var nx = c / (double)Math.Max(cols - 1, 1);
-                var ny = r / (double)Math.Max(rows - 1, 1);
-                var R = 0.5 * (1.0 + SmoothNoise(nx * 1.55 + 0.2, ny * 1.48 - 0.11, seed));
-                R = Math.Clamp(R, 0, 1);
-                terrainRuggedness[c, r] = R;
+            var nx = c / (double)Math.Max(cols - 1, 1);
+            var ny = r / (double)Math.Max(rows - 1, 1);
+            var R = 0.5 * (1.0 + SmoothNoise(nx * 1.55 + 0.2, ny * 1.48 - 0.11, seed));
+            R = Math.Clamp(R, 0, 1);
+            terrainRuggedness[c, r] = R;
 
-                var ridged = RidgedFbm(nx * 7.2, ny * 7.2, 5, seed + 101);
-                var detailSmooth = SmoothNoise(nx * 4.1, ny * 4.1, seed + 303) - 0.5;
-                var roughAmt = spec.TerrainAmplitude * (0.11 + 0.41 * R);
-                h[c, r] += R * ridged * roughAmt + (1 - R) * detailSmooth * spec.TerrainAmplitude * 0.045;
-            }
-        }
+            var ridged = RidgedFbm(nx * 7.2, ny * 7.2, 5, seed + 101);
+            var detailSmooth = SmoothNoise(nx * 4.1, ny * 4.1, seed + 303) - 0.5;
+            var roughAmt = spec.TerrainAmplitude * (0.11 + 0.41 * R);
+            h[c, r] += R * ridged * roughAmt + (1 - R) * detailSmooth * spec.TerrainAmplitude * 0.045;
+        });
 
         if (spec.TerrainRidgeWeight > 1e-6)
         {
-            for (var c = 0; c < cols; c++)
+            ParallelForCols(cols, rows, (c, r) =>
             {
-                for (var r = 0; r < rows; r++)
-                {
-                    var nx = c / (double)Math.Max(cols - 1, 1);
-                    var ny = r / (double)Math.Max(rows - 1, 1);
-                    var n0 = SmoothNoise(nx * 5.1, ny * 5.1, seed + 17);
-                    var ridge = 1.0 - Math.Abs(n0 * 2.0 - 1.0);
-                    var R = terrainRuggedness[c, r];
-                    h[c, r] += spec.TerrainAmplitude * spec.TerrainRidgeWeight * ridge * (0.32 + 0.68 * R);
-                }
-            }
+                var nx = c / (double)Math.Max(cols - 1, 1);
+                var ny = r / (double)Math.Max(rows - 1, 1);
+                var n0 = SmoothNoise(nx * 5.1, ny * 5.1, seed + 17);
+                var ridge = 1.0 - Math.Abs(n0 * 2.0 - 1.0);
+                var R = terrainRuggedness[c, r];
+                h[c, r] += spec.TerrainAmplitude * spec.TerrainRidgeWeight * ridge * (0.32 + 0.68 * R);
+            });
         }
 
         if (spec.MountainPeakCount <= 0)
@@ -1650,25 +1330,23 @@ public static class ProceduralPhysicalWorldGenerator
             peaks.Add((bestC, bestR));
             var lift = spec.TerrainAmplitude * spec.MountainLiftScale * (0.8 + rng.NextDouble() * 0.52);
             var radiusCells = Math.Max(3.6, span * (0.044 + rng.NextDouble() * 0.054));
-            for (var c = 0; c < cols; c++)
+            var peakIndex = p;
+            ParallelForCols(cols, rows, (c, r) =>
             {
-                for (var r = 0; r < rows; r++)
-                {
-                    var dx = c - bestC;
-                    var dy = r - bestR;
-                    var d = Math.Sqrt(dx * dx + dy * dy) / radiusCells;
-                    if (d > 1.14)
-                        continue;
-                    var t = Math.Clamp(d, 0, 1);
-                    var bump = lift * Math.Pow(1.0 - t, 1.94);
-                    var nx = c / (double)Math.Max(cols - 1, 1);
-                    var ny = r / (double)Math.Max(rows - 1, 1);
-                    var spikey = 1.0 + 0.24 * RidgedFbm(nx * 14.0, ny * 14.0, 3, seed + p * 173);
-                    h[c, r] += bump * spikey;
-                    if (d < 0.5)
-                        mountainMask[c, r] = true;
-                }
-            }
+                var dx = c - bestC;
+                var dy = r - bestR;
+                var d = Math.Sqrt(dx * dx + dy * dy) / radiusCells;
+                if (d > 1.14)
+                    return;
+                var t = Math.Clamp(d, 0, 1);
+                var bump = lift * Math.Pow(1.0 - t, 1.94);
+                var nx = c / (double)Math.Max(cols - 1, 1);
+                var ny = r / (double)Math.Max(rows - 1, 1);
+                var spikey = 1.0 + 0.24 * RidgedFbm(nx * 14.0, ny * 14.0, 3, seed + peakIndex * 173);
+                h[c, r] += bump * spikey;
+                if (d < 0.5)
+                    mountainMask[c, r] = true;
+            });
         }
     }
 
@@ -1851,20 +1529,17 @@ public static class ProceduralPhysicalWorldGenerator
         var width = Math.Max(1, spec.CoastalShelfCells);
         var dist = GridDistanceToOcean(isOcean, cols, rows);
         var drop = spec.TerrainAmplitude * 0.14 + spec.RiverBedCarve * 0.35;
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                if (isOcean[c, r])
-                    continue;
-                var d = dist[c, r];
-                if (d > width + 2)
-                    continue;
-                var t = 1.0 - Math.Clamp(d / (width + 1.5), 0, 1);
-                var w = t * t * (3 - 2 * t);
-                h[c, r] -= drop * w;
-            }
-        }
+            if (isOcean[c, r])
+                return;
+            var d = dist[c, r];
+            if (d > width + 2)
+                return;
+            var t = 1.0 - Math.Clamp(d / (width + 1.5), 0, 1);
+            var w = t * t * (3 - 2 * t);
+            h[c, r] -= drop * w;
+        });
     }
 
     private static int[,] GridDistanceToOcean(bool[,] isOcean, int cols, int rows)
@@ -2625,14 +2300,11 @@ public static class ProceduralPhysicalWorldGenerator
 
     private static void CarveOceanFloor(double[,] h, int cols, int rows, bool[,] isOcean, double seaZ, double depth)
     {
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                if (isOcean[c, r])
-                    h[c, r] = Math.Min(h[c, r], seaZ - depth);
-            }
-        }
+            if (isOcean[c, r])
+                h[c, r] = Math.Min(h[c, r], seaZ - depth);
+        });
     }
 
     private static Dictionary<int, double> ComputeLakeWaterLevels(double[,] h, int[,] lakeId, int cols, int rows)
@@ -2671,14 +2343,11 @@ public static class ProceduralPhysicalWorldGenerator
     private static void CarveLakeBedForId(double[,] h, int cols, int rows, int[,] lakeId, int id, double waterZ,
         double depth)
     {
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                if (lakeId[c, r] == id)
-                    h[c, r] = Math.Min(h[c, r], waterZ - depth);
-            }
-        }
+            if (lakeId[c, r] == id)
+                h[c, r] = Math.Min(h[c, r], waterZ - depth);
+        });
     }
 
     private static void FinalizeCoastalWaterSurfaces(
@@ -2695,25 +2364,19 @@ public static class ProceduralPhysicalWorldGenerator
         double cell,
         ProceduralWorldSpec spec)
     {
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                if (isOcean[c, r])
-                    h[c, r] = oceanWaterZ;
-            }
-        }
+            if (isOcean[c, r])
+                h[c, r] = oceanWaterZ;
+        });
 
-        for (var c = 0; c < cols; c++)
+        ParallelForCols(cols, rows, (c, r) =>
         {
-            for (var r = 0; r < rows; r++)
-            {
-                var id = lakeId[c, r];
-                if (id <= 0 || !lakeLevels.TryGetValue(id, out var lz))
-                    continue;
-                h[c, r] = lz;
-            }
-        }
+            var id = lakeId[c, r];
+            if (id <= 0 || !lakeLevels.TryGetValue(id, out var lz))
+                return;
+            h[c, r] = lz;
+        });
 
         foreach (var path in riverPaths)
         {

@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using LetsAdventure.Core.Simulation;
 
 namespace LetsAdventure.Core.World;
@@ -13,8 +14,11 @@ public static class BaselinePhysicalWorldGenerator
 
     public const double GroundLevelZ = 0;
 
-    /// <summary>Nav grid resolution (pathfinding / authoring samples over the huge XY extent).</summary>
-    public const int BaselineGridDimension = 1024;
+    /// <summary>
+    /// Columns and rows of the nav / hydrology sampling grid across the <b>full</b> <see cref="DefaultExtentXy"/> world
+    /// (not a small local patch). Larger values increase detail, RAM, and generation time (~quadratic in this number).
+    /// </summary>
+    public const int BaselineGridDimension = 4096;
 
     public static PhysicalWorldGenerationResult Generate(int? seed = null, IProgress<string>? progress = null)
     {
@@ -48,7 +52,6 @@ public static class BaselinePhysicalWorldGenerator
             SlopeRelaxationIterations = 56,
             RiverBedCarve = 44,
             GeneratedRegionId = "region.baseline_placeholder",
-            UsePerimeterOcean = true,
             ContinentalDomeAmplitude = 880,
             OceanBandMinWorld = span * 0.056,
             OceanBandVariationWorld = span * 0.05,
@@ -222,32 +225,68 @@ public static class BaselinePhysicalWorldGenerator
 
         const int barrierId = -999;
         var owner = new int[rows * cols];
-        for (var j = 0; j < rows; j++)
+        var large = (long)cols * rows >= 65_536;
+        if (large)
         {
-            for (var i = 0; i < cols; i++)
+            Parallel.For(0, rows, j =>
             {
-                var cell = cells[j * cols + i];
-                if (!cell.Walkable || cell.Composition == SurfaceComposition.Water)
-                    owner[j * cols + i] = barrierId;
-                else
+                for (var i = 0; i < cols; i++)
                 {
-                    var wx = ox + (i + 0.5) * cs;
-                    var wy = oy + (j + 0.5) * cs;
-                    var best = 0;
-                    var bestD = double.PositiveInfinity;
-                    for (var s = 0; s < seeds.Count; s++)
+                    var cell = cells[j * cols + i];
+                    if (!cell.Walkable || cell.Composition == SurfaceComposition.Water)
+                        owner[j * cols + i] = barrierId;
+                    else
                     {
-                        var dx = wx - seeds[s].X;
-                        var dy = wy - seeds[s].Y;
-                        var d = dx * dx + dy * dy;
-                        if (d < bestD)
+                        var wx = ox + (i + 0.5) * cs;
+                        var wy = oy + (j + 0.5) * cs;
+                        var best = 0;
+                        var bestD = double.PositiveInfinity;
+                        for (var s = 0; s < seeds.Count; s++)
                         {
-                            bestD = d;
-                            best = s;
+                            var dx = wx - seeds[s].X;
+                            var dy = wy - seeds[s].Y;
+                            var d = dx * dx + dy * dy;
+                            if (d < bestD)
+                            {
+                                bestD = d;
+                                best = s;
+                            }
                         }
-                    }
 
-                    owner[j * cols + i] = best;
+                        owner[j * cols + i] = best;
+                    }
+                }
+            });
+        }
+        else
+        {
+            for (var j = 0; j < rows; j++)
+            {
+                for (var i = 0; i < cols; i++)
+                {
+                    var cell = cells[j * cols + i];
+                    if (!cell.Walkable || cell.Composition == SurfaceComposition.Water)
+                        owner[j * cols + i] = barrierId;
+                    else
+                    {
+                        var wx = ox + (i + 0.5) * cs;
+                        var wy = oy + (j + 0.5) * cs;
+                        var best = 0;
+                        var bestD = double.PositiveInfinity;
+                        for (var s = 0; s < seeds.Count; s++)
+                        {
+                            var dx = wx - seeds[s].X;
+                            var dy = wy - seeds[s].Y;
+                            var d = dx * dx + dy * dy;
+                            if (d < bestD)
+                            {
+                                bestD = d;
+                                best = s;
+                            }
+                        }
+
+                        owner[j * cols + i] = best;
+                    }
                 }
             }
         }

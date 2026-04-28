@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -9,16 +10,99 @@ namespace LetsAdventure.WorldEditor.Services;
 /// <summary>High-detail 2D preview: one pixel per nav cell with composition, vegetation, and optional hillshade.</summary>
 public static class WorldNavGridPreviewRenderer
 {
+    /// <summary>Downsampled PNG for map preview when the full grid lives in chunked files.</summary>
+    public static bool TryWriteOverviewPng(TerrainNavGridDefinition grid, string path, int maxSide = 2048,
+        bool hillshade = true)
+    {
+        if (grid.Cells is null || grid.Columns < 1 || grid.Rows < 1)
+            return false;
+        maxSide = Math.Clamp(maxSide, 256, 8192);
+        var cols = grid.Columns;
+        var rows = grid.Rows;
+        var stepC = Math.Max(1, (cols + maxSide - 1) / maxSide);
+        var stepR = Math.Max(1, (rows + maxSide - 1) / maxSide);
+        var outC = (cols + stepC - 1) / stepC;
+        var outR = (rows + stepR - 1) / stepR;
+
+        var cells = grid.Cells;
+        var (zMin, zMax) = ElevRange(cells, cols, rows);
+        var zSpan = Math.Max(1e-3, zMax - zMin);
+        var stride = outC * 4;
+        var buffer = new byte[stride * outR];
+        for (var or = 0; or < outR; or++)
+        {
+            var r = Math.Min(rows - 1, or * stepR);
+            for (var oc = 0; oc < outC; oc++)
+            {
+                var c = Math.Min(cols - 1, oc * stepC);
+                var cell = cells[r * cols + c];
+                var (b, g, r8, a) = PixelBgra(cell, c, r, cols, rows, cells, zMin, zSpan, hillshade);
+                var o = or * stride + oc * 4;
+                buffer[o] = b;
+                buffer[o + 1] = g;
+                buffer[o + 2] = r8;
+                buffer[o + 3] = a;
+            }
+        }
+
+        var bmp = new WriteableBitmap(outC, outR, 96, 96, PixelFormats.Bgra32, null);
+        bmp.WritePixels(new Int32Rect(0, 0, outC, outR), buffer, stride, 0);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(bmp));
+        using (var fs = File.Create(path))
+            enc.Save(fs);
+        return true;
+    }
+
+    /// <summary>Loads <paramref name="chunkStoreDirectory"/>/preview.png (or manifest name) when cells are external.</summary>
     public static Image? TryBuildNavGridImage(
         PhysicalWorldDefinition world,
         double cellPixels,
         bool hillshade,
         double marginOx,
-        double marginOy)
+        double marginOy,
+        string? chunkStoreDirectory = null)
     {
         var grid = world.Navigation.Grid;
-        if (grid?.Cells is null || grid.Columns < 1 || grid.Rows < 1)
+        if (grid is null || grid.Columns < 1 || grid.Rows < 1)
             return null;
+
+        if (grid.Cells is null || grid.Cells.Count < grid.Columns * grid.Rows)
+        {
+            if (string.IsNullOrEmpty(chunkStoreDirectory))
+                return null;
+            if (!NavGridChunkIO.TryLoadManifest(chunkStoreDirectory, out var manifest) || manifest is null)
+                return null;
+            var png = Path.Combine(chunkStoreDirectory, manifest.PreviewPngFile);
+            if (!File.Exists(png))
+                return null;
+            BitmapImage bi;
+            try
+            {
+                bi = new BitmapImage();
+                bi.BeginInit();
+                bi.CacheOption = BitmapCacheOption.OnLoad;
+                bi.UriSource = new Uri(Path.GetFullPath(png));
+                bi.EndInit();
+                bi.Freeze();
+            }
+            catch
+            {
+                return null;
+            }
+
+            var overviewImage = new Image
+            {
+                Source = bi,
+                Width = bi.PixelWidth * cellPixels,
+                Height = bi.PixelHeight * cellPixels,
+            };
+            Canvas.SetLeft(overviewImage, marginOx);
+            Canvas.SetTop(overviewImage, marginOy);
+            RenderOptions.SetBitmapScalingMode(overviewImage, BitmapScalingMode.HighQuality);
+            return overviewImage;
+        }
 
         var cols = grid.Columns;
         var rows = grid.Rows;

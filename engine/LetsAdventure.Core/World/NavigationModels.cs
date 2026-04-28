@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using LetsAdventure.Core.Simulation;
 
 namespace LetsAdventure.Core.World;
@@ -56,12 +57,24 @@ public sealed class TerrainNavGridDefinition
 {
     public double OriginX { get; set; }
     public double OriginY { get; set; }
+
+    /// <summary>Nav sample spacing along X and Y in meters (world XY uses 1 unit = 1 m).</summary>
     public double CellSize { get; set; } = 4;
     public int Columns { get; set; }
     public int Rows { get; set; }
 
     /// <summary>Row-major: index = row * Columns + col.</summary>
     public List<NavCellDefinition>? Cells { get; set; }
+
+    /// <summary>
+    /// Directory name (relative to the physical world JSON file) containing <c>manifest.json</c> and chunk binaries.
+    /// When set, <see cref="Cells"/> may be omitted from JSON for large worlds.
+    /// </summary>
+    public string? NavGridChunkStoreRelativePath { get; set; }
+
+    /// <summary>Editor-only absolute path for unsaved baseline chunk spill (not serialized).</summary>
+    [JsonIgnore]
+    public string? NavGridChunkSessionDirectoryAbsolute { get; set; }
 }
 
 /// <summary>Runtime grid for pathfinding queries.</summary>

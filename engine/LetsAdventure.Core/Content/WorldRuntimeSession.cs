@@ -8,13 +8,12 @@ using LetsAdventure.Core.World;
 namespace LetsAdventure.Core.Content;
 
 /// <summary>
-/// Loads world content with optional <c>world/content_index.json</c> region bundles.
-/// When the index is missing, behaves as a flat <see cref="ContentPack"/> load.
+/// Loads world content from <c>world/content_index.json</c> (core slice + optional region bundles).
 /// </summary>
 public sealed class WorldRuntimeSession
 {
     private readonly string _contentRoot;
-    private readonly WorldContentIndex? _index;
+    private readonly WorldContentIndex _index;
     private readonly ContentPack _core;
     private readonly List<RegionContentRef> _regionRefs;
     private readonly Dictionary<string, RegionBundle> _bundles = new(StringComparer.Ordinal);
@@ -22,7 +21,7 @@ public sealed class WorldRuntimeSession
 
     private WorldRuntimeSession(
         string contentRoot,
-        WorldContentIndex? index,
+        WorldContentIndex index,
         ContentPack core,
         List<RegionContentRef> regionRefs)
     {
@@ -35,7 +34,7 @@ public sealed class WorldRuntimeSession
     /// <param name="contentRoot">Content root directory (contains lore, world, events, …).</param>
     /// <param name="initialActiveLoreRegions">
     /// Subset of <see cref="RegionContentRef.LoreRegionId"/> to load and merge.
-    /// When null or empty and an index exists, all regions from the index are active.
+    /// When null or empty, all regions listed in the index are active.
     /// </param>
     public static WorldRuntimeSession Load(
         string contentRoot,
@@ -43,12 +42,7 @@ public sealed class WorldRuntimeSession
     {
         var indexPath = Path.Combine(contentRoot, "world", "content_index.json");
         if (!File.Exists(indexPath))
-        {
-            var flatCore = ContentPack.LoadFlat(contentRoot);
-            var session = new WorldRuntimeSession(contentRoot, null, flatCore, []);
-            session.SetActiveLoreRegions(initialActiveLoreRegions);
-            return session;
-        }
+            throw new FileNotFoundException($"Required world content index not found: {indexPath}", indexPath);
 
         var json = File.ReadAllText(indexPath);
         var index = JsonSerializer.Deserialize<WorldContentIndex>(json, GameJson.Options)
@@ -67,13 +61,6 @@ public sealed class WorldRuntimeSession
 
     public void SetActiveLoreRegions(IReadOnlyCollection<string>? loreRegionIds)
     {
-        if (_index is null)
-        {
-            _activeLoreRegionIds = new HashSet<string>(StringComparer.Ordinal);
-            _bundles.Clear();
-            return;
-        }
-
         HashSet<string> next;
         if (loreRegionIds is null || loreRegionIds.Count == 0)
         {
@@ -118,9 +105,6 @@ public sealed class WorldRuntimeSession
     /// </summary>
     public ContentPack ToContentPack()
     {
-        if (_index is null)
-            return _core;
-
         var events = new Dictionary<string, EventDefinition>(_core.Events, StringComparer.Ordinal);
         var quests = new Dictionary<string, QuestBlueprintData>(_core.Quests, StringComparer.Ordinal);
         var establishments = new Dictionary<string, Establishment>(_core.Establishments, StringComparer.Ordinal);

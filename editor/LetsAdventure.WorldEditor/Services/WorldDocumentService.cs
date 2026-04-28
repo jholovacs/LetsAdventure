@@ -12,7 +12,7 @@ public static class WorldDocumentService
         new()
         {
             SchemaVersion = 1,
-            CoordinateDescription = "X/Y horizontal plane, Z vertical (up).",
+            CoordinateDescription = "X/Y horizontal plane, Z vertical (up). 1 coordinate unit = 1 meter (SI).",
             GlobalBounds = new AxisAlignedBounds
             {
                 Min = new Vec3(),
@@ -39,6 +39,7 @@ public static class WorldDocumentService
 
     public static void Save(string path, PhysicalWorldDefinition world)
     {
+        world.NavGridCellSource = null;
         var json = JsonSerializer.Serialize(world, GameJson.Options);
         File.WriteAllText(path, json);
     }

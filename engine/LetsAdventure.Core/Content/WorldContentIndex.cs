@@ -1,7 +1,7 @@
 namespace LetsAdventure.Core.Content;
 
 /// <summary>
-/// Declares how world content is split for scalable loading. If missing, <see cref="ContentPack.Load"/> uses the legacy flat layout.
+/// Declares how world content is split for scalable loading (<c>world/content_index.json</c> at the content root).
 /// </summary>
 public sealed class WorldContentIndex
 {

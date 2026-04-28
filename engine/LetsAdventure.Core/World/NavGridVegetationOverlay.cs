@@ -1,3 +1,5 @@
+using System.Threading.Tasks;
+
 namespace LetsAdventure.Core.World;
 
 /// <summary>
@@ -7,6 +9,9 @@ namespace LetsAdventure.Core.World;
 public static class NavGridVegetationOverlay
 {
     private const int MaxWaterDistanceCells = 96;
+    private const int ParallelCellThreshold = 65_536;
+
+    private static bool ShouldParallelize(int cols, int rows) => (long)cols * rows >= ParallelCellThreshold;
 
     public static void Apply(TerrainNavGridDefinition? grid, Random rng)
     {
@@ -22,101 +27,115 @@ public static class NavGridVegetationOverlay
         var (zMin, zMax) = LandElevationRange(cols, rows, cells);
         var zSpan = Math.Max(1e-3, zMax - zMin);
 
-        for (var r = 1; r < rows - 1; r++)
+        void Body(int c, int r)
         {
-            for (var c = 1; c < cols - 1; c++)
+            var i = r * cols + c;
+            var cell = cells[i];
+            if (IsOpenWater(cell))
             {
-                var i = r * cols + c;
-                var cell = cells[i];
-                if (IsOpenWater(cell))
-                {
-                    cell.VegetationDensity01 = 0;
-                    cell.VegetationCommunity = VegetationCommunityKind.None;
-                    cell.VegetationStrata = VegetationStratum.None;
-                    continue;
-                }
+                cell.VegetationDensity01 = 0;
+                cell.VegetationCommunity = VegetationCommunityKind.None;
+                cell.VegetationStrata = VegetationStratum.None;
+                return;
+            }
 
-                if (!cell.Walkable)
-                {
-                    cell.VegetationDensity01 = 0;
-                    cell.VegetationCommunity = VegetationCommunityKind.None;
-                    cell.VegetationStrata = VegetationStratum.None;
-                    continue;
-                }
+            if (!cell.Walkable)
+            {
+                cell.VegetationDensity01 = 0;
+                cell.VegetationCommunity = VegetationCommunityKind.None;
+                cell.VegetationStrata = VegetationStratum.None;
+                return;
+            }
 
-                var ez = cell.ElevationZ;
-                var zRel = (ez - zMin) / zSpan;
-                var maxOrtho = MaxOrthogonalStep(cells, cols, rows, c, r);
-                var slopeNorm = Math.Clamp(maxOrtho / (zSpan * 0.14 + 1e-6), 0, 3);
-                var dep = DepressionVsNeighbors(cells, cols, rows, c, r);
-                var depNorm = Math.Clamp(dep / (zSpan * 0.22 + 1e-6), 0, 2);
-                var dW = distWater[i];
-                var dWn = Math.Clamp(dW / 48.0, 0, 1);
-                var moist = Math.Exp(-dW * 0.085);
+            var ez = cell.ElevationZ;
+            var zRel = (ez - zMin) / zSpan;
+            var maxOrtho = MaxOrthogonalStep(cells, cols, rows, c, r);
+            var slopeNorm = Math.Clamp(maxOrtho / (zSpan * 0.14 + 1e-6), 0, 3);
+            var dep = DepressionVsNeighbors(cells, cols, rows, c, r);
+            var depNorm = Math.Clamp(dep / (zSpan * 0.22 + 1e-6), 0, 2);
+            var dW = distWater[i];
+            var dWn = Math.Clamp(dW / 48.0, 0, 1);
+            var moist = Math.Exp(-dW * 0.085);
 
-                var comp = cell.Composition;
-                var alpine = comp is SurfaceComposition.Rock or SurfaceComposition.Ice
-                             || zRel > 0.76
-                             || slopeNorm > 1.05;
-                var sandCoastal = comp == SurfaceComposition.Sand;
+            var comp = cell.Composition;
+            var alpine = comp is SurfaceComposition.Rock or SurfaceComposition.Ice
+                         || zRel > 0.76
+                         || slopeNorm > 1.05;
+            var sandCoastal = comp == SurfaceComposition.Sand;
 
-                VegetationCommunityKind community;
-                VegetationStratum strata;
-                double density;
+            VegetationCommunityKind community;
+            VegetationStratum strata;
+            double density;
 
-                if (alpine)
-                {
-                    community = VegetationCommunityKind.AlpineSparse;
-                    strata = VegetationStratum.Shrub | VegetationStratum.ForbWildflower | VegetationStratum.WeedyHerb;
-                    density = 0.1 + 0.22 * moist + 0.08 * (1 - zRel);
-                    if (comp == SurfaceComposition.Rock)
-                        density *= 0.65;
-                }
-                else if (sandCoastal && !alpine)
-                {
-                    community = VegetationCommunityKind.CoastalSandSparse;
-                    strata = VegetationStratum.Grass | VegetationStratum.Shrub | VegetationStratum.ForbWildflower;
-                    density = 0.18 + 0.35 * moist + 0.06 * (1 - dWn);
-                }
-                else if (dW <= 4)
-                {
-                    community = VegetationCommunityKind.RiparianWoodland;
-                    strata = VegetationStratum.Grass | VegetationStratum.Shrub | VegetationStratum.Tree;
-                    density = 0.72 + 0.22 * (1 - dWn * 0.35) + 0.06 * depNorm;
-                    density = Math.Min(0.98, density);
-                }
-                else if (zRel < 0.48 && depNorm > 0.18 && slopeNorm < 0.72 && dW is > 3 and < 38)
-                {
-                    community = VegetationCommunityKind.LowlandForest;
-                    strata = VegetationStratum.Tree | VegetationStratum.Shrub | VegetationStratum.Grass;
-                    density = 0.62 + 0.28 * moist + 0.12 * depNorm;
-                    density = Math.Min(0.97, density);
-                }
-                else if (slopeNorm < 0.55 && zRel < 0.7 && dW > 5)
-                {
-                    community = VegetationCommunityKind.PlainsHerbaceous;
-                    strata = VegetationStratum.Grass | VegetationStratum.Shrub;
-                    if (Hash01(c, r, jitterSalt) < 0.22)
-                        strata |= VegetationStratum.ForbWildflower;
-                    density = 0.58 + 0.26 * (1 - zRel * 0.35) + 0.08 * (1 - dWn);
-                    density = Math.Min(0.94, density);
-                }
-                else
-                {
-                    community = VegetationCommunityKind.TransitionMixed;
-                    strata = VegetationStratum.Grass | VegetationStratum.Shrub;
-                    if (zRel < 0.55 && moist > 0.35)
-                        strata |= VegetationStratum.Tree;
-                    if (Hash01(c, r, jitterSalt + 17) < 0.35)
-                        strata |= VegetationStratum.ForbWildflower;
-                    density = 0.35 + 0.35 * moist + 0.12 * (1 - slopeNorm * 0.4);
-                    density = Math.Clamp(density, 0.12, 0.88);
-                }
+            if (alpine)
+            {
+                community = VegetationCommunityKind.AlpineSparse;
+                strata = VegetationStratum.Shrub | VegetationStratum.ForbWildflower | VegetationStratum.WeedyHerb;
+                density = 0.1 + 0.22 * moist + 0.08 * (1 - zRel);
+                if (comp == SurfaceComposition.Rock)
+                    density *= 0.65;
+            }
+            else if (sandCoastal && !alpine)
+            {
+                community = VegetationCommunityKind.CoastalSandSparse;
+                strata = VegetationStratum.Grass | VegetationStratum.Shrub | VegetationStratum.ForbWildflower;
+                density = 0.18 + 0.35 * moist + 0.06 * (1 - dWn);
+            }
+            else if (dW <= 4)
+            {
+                community = VegetationCommunityKind.RiparianWoodland;
+                strata = VegetationStratum.Grass | VegetationStratum.Shrub | VegetationStratum.Tree;
+                density = 0.72 + 0.22 * (1 - dWn * 0.35) + 0.06 * depNorm;
+                density = Math.Min(0.98, density);
+            }
+            else if (zRel < 0.48 && depNorm > 0.18 && slopeNorm < 0.72 && dW is > 3 and < 38)
+            {
+                community = VegetationCommunityKind.LowlandForest;
+                strata = VegetationStratum.Tree | VegetationStratum.Shrub | VegetationStratum.Grass;
+                density = 0.62 + 0.28 * moist + 0.12 * depNorm;
+                density = Math.Min(0.97, density);
+            }
+            else if (slopeNorm < 0.55 && zRel < 0.7 && dW > 5)
+            {
+                community = VegetationCommunityKind.PlainsHerbaceous;
+                strata = VegetationStratum.Grass | VegetationStratum.Shrub;
+                if (Hash01(c, r, jitterSalt) < 0.22)
+                    strata |= VegetationStratum.ForbWildflower;
+                density = 0.58 + 0.26 * (1 - zRel * 0.35) + 0.08 * (1 - dWn);
+                density = Math.Min(0.94, density);
+            }
+            else
+            {
+                community = VegetationCommunityKind.TransitionMixed;
+                strata = VegetationStratum.Grass | VegetationStratum.Shrub;
+                if (zRel < 0.55 && moist > 0.35)
+                    strata |= VegetationStratum.Tree;
+                if (Hash01(c, r, jitterSalt + 17) < 0.35)
+                    strata |= VegetationStratum.ForbWildflower;
+                density = 0.35 + 0.35 * moist + 0.12 * (1 - slopeNorm * 0.4);
+                density = Math.Clamp(density, 0.12, 0.88);
+            }
 
-                var jitter = (Hash01(c, r, jitterSalt + 911) - 0.5) * 0.08;
-                cell.VegetationDensity01 = Math.Clamp(density + jitter, 0, 1);
-                cell.VegetationCommunity = community;
-                cell.VegetationStrata = strata;
+            var jitter = (Hash01(c, r, jitterSalt + 911) - 0.5) * 0.08;
+            cell.VegetationDensity01 = Math.Clamp(density + jitter, 0, 1);
+            cell.VegetationCommunity = community;
+            cell.VegetationStrata = strata;
+        }
+
+        if (ShouldParallelize(cols, rows))
+        {
+            Parallel.For(1, rows - 1, r =>
+            {
+                for (var c = 1; c < cols - 1; c++)
+                    Body(c, r);
+            });
+        }
+        else
+        {
+            for (var r = 1; r < rows - 1; r++)
+            {
+                for (var c = 1; c < cols - 1; c++)
+                    Body(c, r);
             }
         }
 
@@ -127,42 +146,87 @@ public static class NavGridVegetationOverlay
     {
         var n = cols * rows;
         var copy = new double[n];
-        for (var r = 0; r < rows; r++)
+        if (ShouldParallelize(cols, rows))
         {
-            for (var c = 0; c < cols; c++)
+            Parallel.For(0, rows, r =>
             {
-                var i = r * cols + c;
-                copy[i] = cells[i].VegetationDensity01;
-            }
-        }
-
-        for (var r = 1; r < rows - 1; r++)
-        {
-            for (var c = 1; c < cols - 1; c++)
-            {
-                var i = r * cols + c;
-                if (IsOpenWater(cells[i]) || !cells[i].Walkable)
-                    continue;
-                var sum = 0.0;
-                var w = 0.0;
-                for (var dr = -1; dr <= 1; dr++)
+                for (var c = 0; c < cols; c++)
                 {
-                    for (var dc = -1; dc <= 1; dc++)
+                    var i = r * cols + c;
+                    copy[i] = cells[i].VegetationDensity01;
+                }
+            });
+
+            Parallel.For(1, rows - 1, r =>
+            {
+                for (var c = 1; c < cols - 1; c++)
+                {
+                    var i = r * cols + c;
+                    if (IsOpenWater(cells[i]) || !cells[i].Walkable)
+                        continue;
+                    var sum = 0.0;
+                    var w = 0.0;
+                    for (var dr = -1; dr <= 1; dr++)
                     {
-                        var j = (r + dr) * cols + (c + dc);
-                        if (IsOpenWater(cells[j]) || !cells[j].Walkable)
-                            continue;
-                        var wt = dc == 0 || dr == 0 ? 1.0 : 0.7;
-                        sum += copy[j] * wt;
-                        w += wt;
+                        for (var dc = -1; dc <= 1; dc++)
+                        {
+                            var j = (r + dr) * cols + (c + dc);
+                            if (IsOpenWater(cells[j]) || !cells[j].Walkable)
+                                continue;
+                            var wt = dc == 0 || dr == 0 ? 1.0 : 0.7;
+                            sum += copy[j] * wt;
+                            w += wt;
+                        }
+                    }
+
+                    if (w > 1e-6)
+                    {
+                        var blurred = sum / w;
+                        cells[i].VegetationDensity01 =
+                            Math.Clamp((1 - alpha) * copy[i] + alpha * blurred, 0, 1);
                     }
                 }
-
-                if (w > 1e-6)
+            });
+        }
+        else
+        {
+            for (var r = 0; r < rows; r++)
+            {
+                for (var c = 0; c < cols; c++)
                 {
-                    var blurred = sum / w;
-                    cells[i].VegetationDensity01 =
-                        Math.Clamp((1 - alpha) * copy[i] + alpha * blurred, 0, 1);
+                    var i = r * cols + c;
+                    copy[i] = cells[i].VegetationDensity01;
+                }
+            }
+
+            for (var r = 1; r < rows - 1; r++)
+            {
+                for (var c = 1; c < cols - 1; c++)
+                {
+                    var i = r * cols + c;
+                    if (IsOpenWater(cells[i]) || !cells[i].Walkable)
+                        continue;
+                    var sum = 0.0;
+                    var w = 0.0;
+                    for (var dr = -1; dr <= 1; dr++)
+                    {
+                        for (var dc = -1; dc <= 1; dc++)
+                        {
+                            var j = (r + dr) * cols + (c + dc);
+                            if (IsOpenWater(cells[j]) || !cells[j].Walkable)
+                                continue;
+                            var wt = dc == 0 || dr == 0 ? 1.0 : 0.7;
+                            sum += copy[j] * wt;
+                            w += wt;
+                        }
+                    }
+
+                    if (w > 1e-6)
+                    {
+                        var blurred = sum / w;
+                        cells[i].VegetationDensity01 =
+                            Math.Clamp((1 - alpha) * copy[i] + alpha * blurred, 0, 1);
+                    }
                 }
             }
         }
