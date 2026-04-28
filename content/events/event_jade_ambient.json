@@ -1,0 +1,28 @@
+{
+  "id": "event.jade_ambient",
+  "triggers": {
+    "op": "all",
+    "items": [
+      {
+        "op": "near_anchor",
+        "anchorId": "npc.gate_elder_chen",
+        "maxDistance": 18
+      },
+      {
+        "op": "condition",
+        "condition": {
+          "op": "flag_true",
+          "key": "quest.jade_courier.active"
+        }
+      }
+    ]
+  },
+  "actions": [
+    {
+      "type": "set_flag",
+      "key": "ambient.jade_gate_ping",
+      "value": true
+    }
+  ],
+  "once": true
+}

@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "coordinateDescription": "X/Y horizontal plane in meters, Z vertical (up). Matches anchors.json.",
+  "globalBounds": {
+    "min": { "x": 0, "y": 0, "z": -80 },
+    "max": { "x": 512, "y": 512, "z": 320 }
+  },
+  "regionBoundaries": [
+    {
+      "loreRegionId": "region.jade_threshold",
+      "boundary": {
+        "vertices": [
+          { "x": 80, "y": 20 },
+          { "x": 190, "y": 20 },
+          { "x": 190, "y": 90 },
+          { "x": 80, "y": 90 }
+        ],
+        "zMin": -40,
+        "zMax": 220
+      }
+    }
+  ],
+  "territories": [
+    {
+      "id": "terr.jade_azure_strip",
+      "claimantFactionId": "faction.azure_peak",
+      "loreRegionId": "region.jade_threshold",
+      "priority": 10,
+      "boundary": {
+        "vertices": [
+          { "x": 100, "y": 32 },
+          { "x": 175, "y": 32 },
+          { "x": 175, "y": 72 },
+          { "x": 100, "y": 72 }
+        ],
+        "zMin": -10,
+        "zMax": 180
+      }
+    }
+  ],
+  "features": [
+    {
+      "kind": "ground_plateau",
+      "id": "feat.jade_valley_floor",
+      "layerPriority": 0,
+      "boundary": [
+        { "x": 80, "y": 20 },
+        { "x": 190, "y": 20 },
+        { "x": 190, "y": 90 },
+        { "x": 80, "y": 90 }
+      ],
+      "elevationZ": 0,
+      "composition": "soil"
+    },
+    {
+      "kind": "path",
+      "id": "feat.road_gate_to_post",
+      "layerPriority": 6,
+      "centerline": [
+        { "x": 120, "y": 40 },
+        { "x": 122, "y": 41 }
+      ],
+      "halfWidth": 4,
+      "surface": "pavement",
+      "movementCostMultiplier": 0.88
+    },
+    {
+      "kind": "vegetation",
+      "id": "feat.bamboo_near_gate",
+      "layerPriority": 4,
+      "boundary": [
+        { "x": 124, "y": 42 },
+        { "x": 142, "y": 42 },
+        { "x": 142, "y": 58 },
+        { "x": 124, "y": 58 }
+      ],
+      "zMin": 0,
+      "zMax": 18,
+      "density01": 0.5,
+      "movementCostMultiplier": 1.18
+    },
+    {
+      "kind": "water_standing",
+      "id": "feat.threshold_well",
+      "layerPriority": 3,
+      "shoreline": [
+        { "x": 117, "y": 37 },
+        { "x": 119, "y": 37 },
+        { "x": 119, "y": 39 },
+        { "x": 117, "y": 39 }
+      ],
+      "waterSurfaceZ": 0.15,
+      "depth": 2.5
+    },
+    {
+      "kind": "mountain_ridge",
+      "id": "feat.iron_root_spur",
+      "layerPriority": 8,
+      "ridgeLine": [
+        { "x": 185, "y": 25 },
+        { "x": 200, "y": 45 },
+        { "x": 210, "y": 70 }
+      ],
+      "corridorHalfWidth": 35,
+      "baseElevationZ": 0,
+      "peakElevationZ": 95,
+      "surfaceComposition": "rock"
+    },
+    {
+      "kind": "sky_volume",
+      "id": "feat.local_sky_shell",
+      "layerPriority": -100,
+      "bounds": {
+        "min": { "x": 70, "y": 10, "z": 40 },
+        "max": { "x": 200, "y": 100, "z": 260 }
+      }
+    }
+  ],
+  "navigation": {
+    "graph": {
+      "nodes": [
+        {
+          "id": "nav.jade_gate",
+          "position": { "x": 120, "y": 40, "z": 0 },
+          "tags": ["outdoor", "road"]
+        },
+        {
+          "id": "nav.elder_chen",
+          "position": { "x": 122, "y": 41, "z": 0 },
+          "tags": ["outdoor"]
+        },
+        {
+          "id": "nav.mist_ferry",
+          "position": { "x": 300, "y": 210, "z": 0 },
+          "tags": ["dock", "water"]
+        }
+      ],
+      "edges": [
+        {
+          "fromId": "nav.jade_gate",
+          "toId": "nav.elder_chen",
+          "traverseCost": 1,
+          "bidirectional": true
+        },
+        {
+          "fromId": "nav.jade_gate",
+          "toId": "nav.mist_ferry",
+          "traverseCost": 135,
+          "bidirectional": true
+        }
+      ]
+    },
+    "grid": {
+      "originX": 110,
+      "originY": 34,
+      "cellSize": 2,
+      "columns": 14,
+      "rows": 14
+    }
+  }
+}

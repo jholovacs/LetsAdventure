@@ -1,0 +1,10 @@
+{
+  "marriedLoyaltyBaseline": 88,
+  "minLoyalty": 0,
+  "maxLoyalty": 100,
+  "minFriendship": -100,
+  "maxFriendship": 100,
+  "minRomanticInterest": 0,
+  "maxRomanticInterest": 100,
+  "infidelityPressureScale": 0.014
+}

@@ -1,0 +1,70 @@
+{
+  "instances": [
+    {
+      "npcId": "npc.gate_elder_chen",
+      "templateId": "tpl.gate_warden",
+      "homeEstablishmentId": "est.chen_hut",
+      "workEstablishmentId": "est.jade_gate_post",
+      "factionIds": ["faction.jade_admin", "faction.azure_peak"],
+      "extraTraits": ["duty_bound"],
+      "cultivation": { "realmId": "realm.foundation", "stageIndex": 4 },
+      "face": 78,
+      "intimacy": {
+        "genderPresentation": "masculine",
+        "orientation": {
+          "towardMasculinePresentation": 0.25,
+          "towardFemininePresentation": 0.82,
+          "romanticDrive": 0.42
+        },
+        "loyaltyIntegrity": 93,
+        "relationshipStatus": "married",
+        "spouseCharacterIds": ["npc.chen_spouse_offscreen"],
+        "romanticInterestTargets": []
+      }
+    },
+    {
+      "npcId": "npc.merchant_lu",
+      "templateId": "tpl.merchant",
+      "homeEstablishmentId": "est.traveler_inn",
+      "workEstablishmentId": "est.market_stalls",
+      "factionIds": ["faction.caravan_guild"],
+      "extraTraits": ["glib"],
+      "cultivation": { "realmId": "realm.qi_vein", "stageIndex": 2 },
+      "face": 62,
+      "intimacy": {
+        "genderPresentation": "non_binary",
+        "orientation": {
+          "towardMasculinePresentation": 0.62,
+          "towardFemininePresentation": 0.58,
+          "romanticDrive": 0.72
+        },
+        "loyaltyIntegrity": 46,
+        "relationshipStatus": "married",
+        "spouseCharacterIds": ["npc.lu_spouse_caravan"],
+        "romanticInterestTargets": ["npc.outer_disciple"]
+      }
+    },
+    {
+      "npcId": "npc.outer_disciple",
+      "templateId": "tpl.ascetic_disciple",
+      "homeEstablishmentId": "est.traveler_inn",
+      "workEstablishmentId": "est.outer_training_yard",
+      "factionIds": ["faction.azure_peak"],
+      "extraTraits": ["stubborn"],
+      "cultivation": { "realmId": "realm.foundation", "stageIndex": 0 },
+      "face": 48,
+      "intimacy": {
+        "genderPresentation": "masculine",
+        "orientation": {
+          "towardMasculinePresentation": 0.55,
+          "towardFemininePresentation": 0.5,
+          "romanticDrive": 0.48
+        },
+        "loyaltyIntegrity": 68,
+        "relationshipStatus": "single",
+        "spouseCharacterIds": [],
+        "romanticInterestTargets": []
+      }
+    }
+  ]
+}

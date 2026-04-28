@@ -1,0 +1,82 @@
+{
+  "questId": "quest.jade_courier",
+  "title": "Jade Threshold Courier",
+  "summary": "A mundane commission that becomes complicated if the road knows your name.",
+  "baseObjectives": [
+    {
+      "id": "deliver_spirit_rice",
+      "kind": "go_region",
+      "description": "Deliver sealed spirit-rice to the Mist Lake broker.",
+      "targetId": "region.mist_lake",
+      "onCompleteEffects": [
+        {
+          "type": "add_friendship",
+          "observerId": "character.player",
+          "targetId": "npc.merchant_lu",
+          "delta": 3
+        }
+      ]
+    }
+  ],
+  "fragments": [
+    {
+      "when": { "op": "realm_order_gte", "realmId": "realm.foundation" },
+      "objectives": [
+        {
+          "id": "optional_escort",
+          "kind": "custom",
+          "description": "Bandits respect Foundation cultivators—prove your stage at the roadside shrine."
+        }
+      ]
+    },
+    {
+      "when": {
+        "op": "any",
+        "items": [
+          { "op": "weather_is", "weather": "ash_storm" },
+          { "op": "world_tag", "tag": "drought_season" }
+        ]
+      },
+      "objectives": [
+        {
+          "id": "detour_oasis",
+          "kind": "go_region",
+          "description": "The ash storm closed the ferry; detour through Iron Root Range.",
+          "targetId": "region.iron_root_range"
+        }
+      ],
+      "journalNotes": [
+        "The steward muttered about 'season debts'—the wastes are hungry this year."
+      ]
+    },
+    {
+      "when": { "op": "sect_is", "sectId": "sect.azure_peak" },
+      "objectives": [
+        {
+          "id": "sword_oath_stamp",
+          "kind": "collect_flag",
+          "description": "Affix the sword-court seal so Azure Peak accepts liability for the cargo.",
+          "flagKey": "courier.azure_seal"
+        }
+      ]
+    }
+  ],
+  "prerequisites": {
+    "op": "all",
+    "items": [
+      { "op": "in_region", "regionId": "region.jade_threshold" },
+      {
+        "op": "not",
+        "item": { "op": "quest_completed", "questId": "quest.jade_courier" }
+      }
+    ]
+  },
+  "onQuestSuccessEffects": [
+    {
+      "type": "add_friendship",
+      "observerId": "character.player",
+      "targetId": "npc.gate_elder_chen",
+      "delta": 6
+    }
+  ]
+}

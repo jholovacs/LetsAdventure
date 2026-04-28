@@ -1,0 +1,352 @@
+<Window x:Class="LetsAdventure.WorldEditor.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:hx="http://helix-toolkit.org/wpf/SharpDX"
+        Title="LetsAdventure World Editor"
+        Height="760" Width="1040"
+        WindowStartupLocation="CenterScreen"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewKeyUp="Window_PreviewKeyUp">
+  <DockPanel>
+    <Menu DockPanel.Dock="Top">
+      <MenuItem Header="_File">
+        <MenuItem Header="_New" Click="New_Click" InputGestureText="Ctrl+N" />
+        <MenuItem Header="_Generate procedural world…" Click="GenerateWorld_Click" />
+        <MenuItem Header="Generate _baseline world (large)" Click="BaselineWorld_Click" />
+        <MenuItem Header="_Open…" Click="Open_Click" InputGestureText="Ctrl+O" />
+        <MenuItem Header="_Save" Click="Save_Click" InputGestureText="Ctrl+S" />
+        <MenuItem Header="Save _As…" Click="SaveAs_Click" />
+        <Separator />
+        <MenuItem Header="Export _features overlay…" Click="ExportFeatures_Click"
+                  ToolTip="Writes physical_world.features.json (merged by engine after physical_world.json)." />
+        <Separator />
+        <MenuItem Header="E_xit" Click="Exit_Click" />
+      </MenuItem>
+        <MenuItem Header="_View">
+        <MenuItem Header="_Refresh map preview" Click="RefreshPreview_Click" />
+        <MenuItem Header="Refresh _3D scene" Click="World3D_RefreshMenu_Click" />
+      </MenuItem>
+    </Menu>
+    <ToolBar DockPanel.Dock="Top">
+      <Button Content="Baseline world (2³¹ × 2³¹ XY, Z 0–12288)" Click="BaselineWorld_Click"
+              ToolTip="Generate a huge navigable baseline: 2^31 × 2^31 XY (~2.15e9 per axis), 1024² nav grid, hydrology, ocean, high Z headroom for mountains, and a subdivided smooth 3D terrain mesh." />
+    </ToolBar>
+    <StatusBar DockPanel.Dock="Bottom">
+      <StatusBarItem>
+        <TextBlock x:Name="StatusPath" Text="No file" />
+      </StatusBarItem>
+      <Separator />
+      <StatusBarItem>
+        <TextBlock x:Name="StatusDirty" />
+      </StatusBarItem>
+    </StatusBar>
+    <TabControl x:Name="MainTabs" Margin="8" SelectionChanged="MainTabs_SelectionChanged">
+      <TabItem Header="Metadata">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="12" MaxWidth="720">
+            <Label Content="Coordinate description" />
+            <TextBox x:Name="TxtCoordDesc" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="48" />
+            <Grid Margin="0,12,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="120" />
+                <ColumnDefinition Width="24" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="120" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
+              </Grid.RowDefinitions>
+              <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Global min X" Margin="0,4" />
+              <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtMinX" Margin="0,4" />
+              <TextBlock Grid.Row="0" Grid.Column="3" VerticalAlignment="Center" Text="Global max X" Margin="0,4" />
+              <TextBox Grid.Row="0" Grid.Column="4" x:Name="TxtMaxX" Margin="0,4" />
+              <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Global min Y" Margin="0,4" />
+              <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtMinY" Margin="0,4" />
+              <TextBlock Grid.Row="1" Grid.Column="3" VerticalAlignment="Center" Text="Global max Y" Margin="0,4" />
+              <TextBox Grid.Row="1" Grid.Column="4" x:Name="TxtMaxY" Margin="0,4" />
+              <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Global min Z" Margin="0,4" />
+              <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtMinZ" Margin="0,4" />
+              <TextBlock Grid.Row="2" Grid.Column="3" VerticalAlignment="Center" Text="Global max Z" Margin="0,4" />
+              <TextBox Grid.Row="2" Grid.Column="4" x:Name="TxtMaxZ" Margin="0,4" />
+            </Grid>
+            <Button Content="Apply metadata to world" Margin="0,16,0,0" HorizontalAlignment="Left" Click="ApplyMetadata_Click" />
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Regions">
+        <Grid Margin="8">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <DockPanel Grid.Column="0">
+            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
+              <Button Content="Add" Width="72" Click="RegionAdd_Click" />
+              <Button Content="Remove" Width="72" Margin="8,0,0,0" Click="RegionRemove_Click" />
+            </StackPanel>
+            <ListBox x:Name="LstRegions" DisplayMemberPath="LoreRegionId"
+                     SelectionChanged="LstRegions_SelectionChanged" />
+          </DockPanel>
+          <ScrollViewer Grid.Column="1" Margin="16,0,0,0">
+            <StackPanel x:Name="RegionEditor" IsEnabled="False">
+              <Label Content="Lore region id (e.g. region.jade_threshold)" />
+              <TextBox x:Name="TxtRegionLoreId" />
+              <Label Content="Z min / Z max" Margin="0,8,0,0" />
+              <StackPanel Orientation="Horizontal">
+                <TextBox x:Name="TxtRegionZMin" Width="120" />
+                <TextBox x:Name="TxtRegionZMax" Width="120" Margin="8,0,0,0" />
+              </StackPanel>
+              <Label Content="Vertices (one X,Y pair per line)" Margin="0,8,0,0" />
+              <TextBox x:Name="TxtRegionVertices" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="200"
+                       FontFamily="Consolas" />
+              <Button Content="Apply region" Margin="0,12,0,0" HorizontalAlignment="Left" Click="RegionApply_Click" />
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+      </TabItem>
+      <TabItem Header="Territories">
+        <Grid Margin="8">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <DockPanel Grid.Column="0">
+            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
+              <Button Content="Add" Width="72" Click="TerritoryAdd_Click" />
+              <Button Content="Remove" Width="72" Margin="8,0,0,0" Click="TerritoryRemove_Click" />
+            </StackPanel>
+            <ListBox x:Name="LstTerritories" DisplayMemberPath="Id"
+                     SelectionChanged="LstTerritories_SelectionChanged" />
+          </DockPanel>
+          <ScrollViewer Grid.Column="1" Margin="16,0,0,0">
+            <StackPanel x:Name="TerritoryEditor" IsEnabled="False">
+              <Label Content="Territory id" />
+              <TextBox x:Name="TxtTerritoryId" />
+              <Label Content="Claimant faction id" Margin="0,8,0,0" />
+              <TextBox x:Name="TxtTerritoryFaction" />
+              <Label Content="Lore region id (optional)" Margin="0,8,0,0" />
+              <TextBox x:Name="TxtTerritoryLoreRegion" />
+              <Label Content="Priority (higher wins overlaps)" Margin="0,8,0,0" />
+              <TextBox x:Name="TxtTerritoryPriority" Width="120" HorizontalAlignment="Left" />
+              <Label Content="Z min / Z max" Margin="0,8,0,0" />
+              <StackPanel Orientation="Horizontal">
+                <TextBox x:Name="TxtTerritoryZMin" Width="120" />
+                <TextBox x:Name="TxtTerritoryZMax" Width="120" Margin="8,0,0,0" />
+              </StackPanel>
+              <Label Content="Vertices (one X,Y per line)" Margin="0,8,0,0" />
+              <TextBox x:Name="TxtTerritoryVertices" AcceptsReturn="True" MinHeight="200" FontFamily="Consolas" />
+              <Button Content="Apply territory" Margin="0,12,0,0" HorizontalAlignment="Left" Click="TerritoryApply_Click" />
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+      </TabItem>
+      <TabItem Header="Features">
+        <Grid Margin="8">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="320" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <DockPanel Grid.Column="0">
+            <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+              <StackPanel Orientation="Horizontal">
+                <ComboBox x:Name="CmbFeatureKind" Width="200" />
+                <Button Content="Add" Margin="8,0,0,0" Click="FeatureAdd_Click" />
+              </StackPanel>
+              <Button Content="Remove selected" Margin="0,8,0,0" HorizontalAlignment="Left" Click="FeatureRemove_Click" />
+            </StackPanel>
+            <ListBox x:Name="LstFeatures" DisplayMemberPath="Id" SelectionChanged="LstFeatures_SelectionChanged" />
+          </DockPanel>
+          <DockPanel Grid.Column="1" Margin="16,0,0,0">
+            <Button DockPanel.Dock="Bottom" Content="Apply JSON to selected feature" Margin="0,8,0,0" Click="FeatureApplyJson_Click" />
+            <TextBox x:Name="TxtFeatureJson" AcceptsReturn="True" TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12" />
+          </DockPanel>
+        </Grid>
+      </TabItem>
+      <TabItem x:Name="NavGraphTab" Header="Nav graph">
+        <Grid Margin="8">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="8" />
+            <RowDefinition Height="*" />
+          </Grid.RowDefinitions>
+          <DockPanel Grid.Row="0">
+            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
+              <Button Content="Add node" Click="NavNodeAdd_Click" />
+              <Button Content="Remove node" Margin="8,0,0,0" Click="NavNodeRemove_Click" />
+            </StackPanel>
+            <DataGrid x:Name="GridNavNodes" AutoGenerateColumns="False" CanUserAddRows="False"
+                      CellEditEnding="GridNav_CellEditEnding">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="Id" Binding="{Binding Id}" Width="*" />
+                <DataGridTextColumn Header="X" Binding="{Binding Position.X}" Width="80" />
+                <DataGridTextColumn Header="Y" Binding="{Binding Position.Y}" Width="80" />
+                <DataGridTextColumn Header="Z" Binding="{Binding Position.Z}" Width="80" />
+                <DataGridTextColumn Header="Tags (comma)" Binding="{Binding TagsCsv}" Width="*" />
+              </DataGrid.Columns>
+            </DataGrid>
+          </DockPanel>
+          <DockPanel Grid.Row="2">
+            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
+              <Button Content="Add edge" Click="NavEdgeAdd_Click" />
+              <Button Content="Remove edge" Margin="8,0,0,0" Click="NavEdgeRemove_Click" />
+            </StackPanel>
+            <DataGrid x:Name="GridNavEdges" AutoGenerateColumns="False" CanUserAddRows="False"
+                      CellEditEnding="GridNav_CellEditEnding">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="From" Binding="{Binding FromId}" Width="*" />
+                <DataGridTextColumn Header="To" Binding="{Binding ToId}" Width="*" />
+                <DataGridTextColumn Header="Cost" Binding="{Binding TraverseCost}" Width="80" />
+                <DataGridCheckBoxColumn Header="Bidirectional" Binding="{Binding Bidirectional}" Width="100" />
+              </DataGrid.Columns>
+            </DataGrid>
+          </DockPanel>
+        </Grid>
+      </TabItem>
+      <TabItem Header="Nav grid">
+        <StackPanel Margin="12" HorizontalAlignment="Left">
+          <StackPanel Orientation="Horizontal" Margin="0,4">
+            <Label Content="Origin X" Width="100" />
+            <TextBox x:Name="TxtGridOriginX" Width="120" />
+            <Label Content="Origin Y" Width="80" Margin="16,0,0,0" />
+            <TextBox x:Name="TxtGridOriginY" Width="120" />
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,4">
+            <Label Content="Cell size" Width="100" />
+            <TextBox x:Name="TxtGridCellSize" Width="120" />
+            <Label Content="Columns" Width="80" Margin="16,0,0,0" />
+            <TextBox x:Name="TxtGridColumns" Width="120" />
+            <Label Content="Rows" Width="60" Margin="16,0,0,0" />
+            <TextBox x:Name="TxtGridRows" Width="120" />
+          </StackPanel>
+          <Button Content="Apply nav grid" Margin="0,16,0,0" HorizontalAlignment="Left" Click="NavGridApply_Click" />
+        </StackPanel>
+      </TabItem>
+      <TabItem Header="Map preview">
+        <DockPanel Margin="8">
+          <StackPanel DockPanel.Dock="Top">
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <Label Content="Vector scale (px / world unit):" VerticalAlignment="Center" />
+              <Slider x:Name="SldPreviewScale" Width="200" Minimum="0.25" Maximum="6" Value="2" TickFrequency="0.25"
+                      IsSnapToTickEnabled="True" ValueChanged="SldPreviewScale_ValueChanged" />
+              <TextBlock VerticalAlignment="Center" Margin="8,0,0,0" Text="{Binding ElementName=SldPreviewScale, Path=Value, StringFormat=F2}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <CheckBox x:Name="ChkPreviewRaster" Content="Nav cell raster (terrain + vegetation)" IsChecked="True"
+                        Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
+              <CheckBox x:Name="ChkPreviewHillshade" Content="Hillshade" IsChecked="True" Margin="16,0,0,0"
+                        Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
+              <CheckBox x:Name="ChkPreviewVectors" Content="Regions / territories / features" IsChecked="True" Margin="16,0,0,0"
+                        Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <Label Content="Raster px / cell:" VerticalAlignment="Center" />
+              <Slider x:Name="SldRasterCellPx" Width="200" Minimum="1" Maximum="8" Value="3" TickFrequency="1"
+                      IsSnapToTickEnabled="True" ValueChanged="SldRasterCellPx_ValueChanged" />
+              <TextBlock VerticalAlignment="Center" Margin="8,0,0,0" Text="{Binding ElementName=SldRasterCellPx, Path=Value}" />
+            </StackPanel>
+          </StackPanel>
+          <Border BorderBrush="Gray" BorderThickness="1" Background="#FFF8F8F8">
+            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+              <Canvas x:Name="PreviewCanvas" Width="2000" Height="2000" />
+            </ScrollViewer>
+          </Border>
+        </DockPanel>
+      </TabItem>
+      <TabItem Header="3D scene" x:Name="Scene3DTab">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,8,0">
+            <StackPanel Margin="8">
+              <TextBlock TextWrapping="Wrap" Foreground="#444"
+                         Text="World X/Y horizontal, Z up. LMB + drag orbits. Mouse wheel zooms. WASD pans the view target on the ground plane (move through the scene). Use focus fields or “Center on bounds” to jump." />
+              <GroupBox Header="Navigate to (world)" Margin="0,10,0,0">
+                <StackPanel Margin="6">
+                  <StackPanel Orientation="Horizontal">
+                    <Label Content="X" Width="28" />
+                    <TextBox x:Name="Txt3DWorldX" Width="88" />
+                    <Label Content="Y" Width="28" Margin="8,0,0,0" />
+                    <TextBox x:Name="Txt3DWorldY" Width="88" />
+                  </StackPanel>
+                  <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                    <Label Content="Z" Width="28" />
+                    <TextBox x:Name="Txt3DWorldZ" Width="88" />
+                    <Button Content="Sample Z from grid" Margin="8,0,0,0" Padding="6,2" Click="World3D_SampleZ_Click" />
+                  </StackPanel>
+                  <Button Content="Set camera focus here" Margin="0,8,0,0" HorizontalAlignment="Left" Click="World3D_ApplyFocus_Click" />
+                  <Button Content="Center on world bounds" Margin="0,6,0,0" HorizontalAlignment="Left" Click="World3D_CenterBounds_Click" />
+                </StackPanel>
+              </GroupBox>
+              <GroupBox Header="Perspective / orbit" Margin="0,10,0,0">
+                <StackPanel Margin="6">
+                  <Label Content="Azimuth (°) — horizontal orbit" />
+                  <Slider x:Name="Sld3DYaw" Minimum="-180" Maximum="180" Value="40" TickFrequency="15"
+                          IsSnapToTickEnabled="False" ValueChanged="World3D_OrbitSlider_ValueChanged" />
+                  <TextBlock x:Name="Txt3DYawValue" Text="40" Margin="0,-4,0,4" />
+                  <Label Content="Elevation (°)" />
+                  <Slider x:Name="Sld3DPitch" Minimum="-85" Maximum="85" Value="52" ValueChanged="World3D_OrbitSlider_ValueChanged" />
+                  <TextBlock x:Name="Txt3DPitchValue" Text="52" Margin="0,-4,0,4" />
+                  <Label Content="Distance (editor units — orbit radius from focus)" />
+                  <Slider x:Name="Sld3DDistance" Minimum="8" Maximum="2000000" Value="2200" ValueChanged="World3D_OrbitSlider_ValueChanged"
+                          ToolTip="How far the camera sits from the orbit focus in scaled view space. Previously the minimum was 120, which blocked tight close-ups." />
+                  <TextBlock x:Name="Txt3DDistanceValue" Text="2200" Margin="0,-4,0,4" />
+                  <Label Content="Field of view (°)" />
+                  <Slider x:Name="Sld3DFov" Minimum="25" Maximum="90" Value="55" ValueChanged="World3D_FovSlider_ValueChanged" />
+                  <TextBlock x:Name="Txt3DFovValue" Text="55" Margin="0,-4,0,0" />
+                  <Label Content="Terrain mesh subdivisions (per nav cell edge)" Margin="0,8,0,0" />
+                  <Slider x:Name="Sld3DTerrainSub" Minimum="1" Maximum="6" Value="3" TickFrequency="1"
+                          IsSnapToTickEnabled="True" ValueChanged="World3D_TerrainDetail_Changed" />
+                  <TextBlock x:Name="Txt3DTerrainSubValue" Text="3" Margin="0,-4,0,4" />
+                  <CheckBox x:Name="Chk3DTerrainHaze" Content="Aerial perspective (distant terrain fades toward sky)"
+                            IsChecked="True" Checked="World3D_TerrainHaze_Changed" Unchecked="World3D_TerrainHaze_Changed" />
+                </StackPanel>
+              </GroupBox>
+              <GroupBox Header="Layers" Margin="0,10,0,0">
+                <StackPanel Margin="6">
+                  <CheckBox x:Name="Chk3DTerrain" Content="Terrain / nav grid" IsChecked="True" Checked="World3D_Layer_Changed" Unchecked="World3D_Layer_Changed" />
+                  <CheckBox x:Name="Chk3DRegions" Content="Regions" IsChecked="True" Checked="World3D_Layer_Changed" Unchecked="World3D_Layer_Changed" />
+                  <CheckBox x:Name="Chk3DTerritories" Content="Territories" IsChecked="True" Checked="World3D_Layer_Changed" Unchecked="World3D_Layer_Changed" />
+                  <CheckBox x:Name="Chk3DFeatures" Content="Features" IsChecked="True" Checked="World3D_Layer_Changed" Unchecked="World3D_Layer_Changed" />
+                  <CheckBox x:Name="Chk3DNavGraph" Content="Nav graph" IsChecked="True" Checked="World3D_Layer_Changed" Unchecked="World3D_Layer_Changed" />
+                </StackPanel>
+              </GroupBox>
+              <Button Content="Rebuild 3D meshes" Margin="0,12,0,0" HorizontalAlignment="Left" Click="World3D_Rebuild_Click" />
+            </StackPanel>
+          </ScrollViewer>
+          <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1" Background="#FF6BB8D6">
+            <hx:Viewport3DX x:Name="WorldViewportDx"
+                            BackgroundColor="#FF87CEEB"
+                            Focusable="True"
+                            IsRotationEnabled="False"
+                            IsPanEnabled="False"
+                            IsZoomEnabled="False"
+                            ToolTip="Wheel: zoom orbit distance. Shift+wheel: orbit elevation (pitch). LMB drag: yaw/pitch."
+                            MouseWheel="WorldViewportDx_OnMouseWheel"
+                            MouseDown="WorldViewportDx_OnMouseDown"
+                            MouseMove="WorldViewportDx_OnMouseMove"
+                            MouseUp="WorldViewportDx_OnMouseUp">
+              <hx:Viewport3DX.Camera>
+                <hx:PerspectiveCamera x:Name="World3DCamera"
+                                      Position="0,1200,8000"
+                                      LookDirection="0,-0.12,-1"
+                                      UpDirection="0,1,0"
+                                      FieldOfView="55"
+                                      NearPlaneDistance="1"
+                                      FarPlaneDistance="500000" />
+              </hx:Viewport3DX.Camera>
+              <hx:DirectionalLight3D Color="#FFFFF2E6" Direction="0.12,-1,0.08" />
+              <hx:DirectionalLight3D Color="#FF5A6B80" Direction="0.35,-0.85,0.25" />
+              <hx:GroupModel3D x:Name="WorldHelixSceneRoot" />
+            </hx:Viewport3DX>
+          </Border>
+        </Grid>
+      </TabItem>
+    </TabControl>
+  </DockPanel>
+</Window>

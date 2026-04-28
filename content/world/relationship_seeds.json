@@ -1,0 +1,24 @@
+{
+  "pairs": [
+    {
+      "observerId": "npc.gate_elder_chen",
+      "targetId": "character.player",
+      "value": 6
+    },
+    {
+      "observerId": "character.player",
+      "targetId": "npc.gate_elder_chen",
+      "value": 4
+    },
+    {
+      "observerId": "npc.merchant_lu",
+      "targetId": "npc.outer_disciple",
+      "value": -8
+    },
+    {
+      "observerId": "npc.outer_disciple",
+      "targetId": "npc.merchant_lu",
+      "value": -3
+    }
+  ]
+}

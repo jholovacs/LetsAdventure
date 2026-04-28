@@ -1,0 +1,14 @@
+{
+  "pairs": [
+    { "fromFactionId": "faction.azure_peak", "toFactionId": "faction.bone_river", "value": -55 },
+    { "fromFactionId": "faction.bone_river", "toFactionId": "faction.azure_peak", "value": -50 },
+    { "fromFactionId": "faction.jade_admin", "toFactionId": "faction.azure_peak", "value": 28 },
+    { "fromFactionId": "faction.azure_peak", "toFactionId": "faction.jade_admin", "value": 22 },
+    { "fromFactionId": "faction.caravan_guild", "toFactionId": "faction.jade_admin", "value": 15 },
+    { "fromFactionId": "faction.jade_admin", "toFactionId": "faction.caravan_guild", "value": 12 },
+    { "fromFactionId": "faction.crimson_lotus", "toFactionId": "faction.azure_peak", "value": 8 },
+    { "fromFactionId": "faction.azure_peak", "toFactionId": "faction.crimson_lotus", "value": 6 },
+    { "fromFactionId": "faction.azure_peak", "toFactionId": "faction.jade_admin", "value": 20 },
+    { "fromFactionId": "faction.caravan_guild", "toFactionId": "faction.azure_peak", "value": 10 }
+  ]
+}

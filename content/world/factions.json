@@ -1,0 +1,9 @@
+{
+  "factions": [
+    { "id": "faction.jade_admin", "name": "Jade Threshold Magistrate", "tags": ["civil", "orthodox"] },
+    { "id": "faction.azure_peak", "name": "Azure Peak Sword Court", "tags": ["sect", "orthodox", "metal"] },
+    { "id": "faction.crimson_lotus", "name": "Crimson Lotus Alchemy Hall", "tags": ["sect", "neutral"] },
+    { "id": "faction.caravan_guild", "name": "Dust Road Caravan Guild", "tags": ["merchant", "neutral"] },
+    { "id": "faction.bone_river", "name": "Bone River Sect", "tags": ["sect", "heterodox"] }
+  ]
+}

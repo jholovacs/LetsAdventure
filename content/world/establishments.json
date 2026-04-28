@@ -1,0 +1,52 @@
+{
+  "establishments": [
+    {
+      "id": "est.chen_hut",
+      "name": "Elder Chen's quarters",
+      "kind": "home",
+      "regionId": "region.jade_threshold",
+      "anchorId": "npc.gate_elder_chen",
+      "tags": ["sleep"]
+    },
+    {
+      "id": "est.jade_gate_post",
+      "name": "Jade Gate watch post",
+      "kind": "workplace",
+      "regionId": "region.jade_threshold",
+      "anchorId": "anchor.jade_gate",
+      "tags": []
+    },
+    {
+      "id": "est.market_stalls",
+      "name": "Threshold day market",
+      "kind": "market",
+      "regionId": "region.jade_threshold",
+      "anchorId": "anchor.jade_gate",
+      "tags": ["food", "social"]
+    },
+    {
+      "id": "est.spring_teahouse",
+      "name": "Spring Veil Teahouse",
+      "kind": "teahouse",
+      "regionId": "region.jade_threshold",
+      "anchorId": "anchor.jade_gate",
+      "tags": ["food", "social"]
+    },
+    {
+      "id": "est.traveler_inn",
+      "name": "Copper Sign Inn",
+      "kind": "inn",
+      "regionId": "region.jade_threshold",
+      "anchorId": "anchor.jade_gate",
+      "tags": ["food", "sleep"]
+    },
+    {
+      "id": "est.outer_training_yard",
+      "name": "Outer sect training yard",
+      "kind": "training_yard",
+      "regionId": "region.jade_threshold",
+      "anchorId": "anchor.jade_gate",
+      "tags": []
+    }
+  ]
+}

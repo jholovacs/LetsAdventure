@@ -1,0 +1,11 @@
+{
+  "factionInfluenceWeight": 0.5,
+  "cultivationRespectPerMinorStep": 3.5,
+  "cultivationRespectCap": 55,
+  "minDisposition": -100,
+  "maxDisposition": 100,
+  "hostileBelow": -40,
+  "waryBelow": -12,
+  "neutralBelow": 12,
+  "warmBelow": 40
+}

@@ -1,0 +1,16 @@
+{
+  "id": "event.quest_jade_complete_pulse",
+  "triggers": {
+    "op": "quest_outcome",
+    "questId": "quest.jade_courier",
+    "outcome": "success"
+  },
+  "actions": [
+    {
+      "type": "set_flag",
+      "key": "quest.jade_courier.pulse_ack",
+      "value": true
+    }
+  ],
+  "once": true
+}

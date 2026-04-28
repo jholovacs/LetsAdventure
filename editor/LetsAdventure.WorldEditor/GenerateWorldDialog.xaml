@@ -1,0 +1,45 @@
+<Window x:Class="LetsAdventure.WorldEditor.GenerateWorldDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Generate procedural world"
+        Height="520" Width="440"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize">
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <StackPanel Margin="16">
+      <TextBlock TextWrapping="Wrap" Margin="0,0,0,12"
+                 Text="Creates a heightfield nav grid, a river that runs downstream into a lake, and JSON features. Land slopes are limited for walkability; water is non-walkable on the grid." />
+      <Label Content="Width (max X − min X)" />
+      <TextBox x:Name="TxtWidth" Text="512" />
+      <Label Content="Height (max Y − min Y)" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtHeight" Text="512" />
+      <Label Content="Min X / Min Y (origin)" Margin="0,8,0,0" />
+      <StackPanel Orientation="Horizontal">
+        <TextBox x:Name="TxtMinX" Width="100" Text="0" />
+        <TextBox x:Name="TxtMinY" Width="100" Margin="8,0,0,0" Text="0" />
+      </StackPanel>
+      <Label Content="Nav cell size (world units)" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtCellSize" Text="4" />
+      <Label Content="Random seed" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtSeed" Text="12345" />
+      <Label Content="Max land step — max |ΔZ| between orthogonal land neighbors" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtMaxStep" Text="1.25" />
+      <Label Content="Terrain amplitude (vertical noise scale)" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtAmplitude" Text="22" />
+      <Label Content="Flow toward angle (degrees): 0 = +X, 90 = +Y" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtFlowAngle" Text="0" />
+      <Label Content="Lake radius (world units)" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtLakeRadius" Text="56" />
+      <Label Content="River channel half-width (world units)" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtRiverHalf" Text="7" />
+      <Label Content="Lake depth (standing water)" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtLakeDepth" Text="3.5" />
+      <Label Content="Generated lore region id" Margin="0,8,0,0" />
+      <TextBox x:Name="TxtRegionId" Text="region.generated" />
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+        <Button Content="OK" Width="88" IsDefault="True" Click="Ok_Click" />
+        <Button Content="Cancel" Width="88" Margin="8,0,0,0" IsCancel="True" />
+      </StackPanel>
+    </StackPanel>
+  </ScrollViewer>
+</Window>

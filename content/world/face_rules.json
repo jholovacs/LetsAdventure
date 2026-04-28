@@ -1,0 +1,6 @@
+{
+  "minFace": 0,
+  "maxFace": 100,
+  "defaultFace": 50,
+  "highFaceThreshold": 72
+}

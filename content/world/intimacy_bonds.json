@@ -1,0 +1,31 @@
+{
+  "friendship": [
+    {
+      "observerId": "npc.gate_elder_chen",
+      "targetId": "character.player",
+      "value": 22
+    },
+    {
+      "observerId": "character.player",
+      "targetId": "npc.gate_elder_chen",
+      "value": 18
+    },
+    {
+      "observerId": "npc.merchant_lu",
+      "targetId": "npc.outer_disciple",
+      "value": 8
+    },
+    {
+      "observerId": "npc.outer_disciple",
+      "targetId": "npc.merchant_lu",
+      "value": 5
+    }
+  ],
+  "romanticInterest": [
+    {
+      "observerId": "npc.merchant_lu",
+      "targetId": "npc.outer_disciple",
+      "value": 38
+    }
+  ]
+}

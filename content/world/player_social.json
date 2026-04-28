@@ -1,0 +1,17 @@
+{
+  "characterId": "character.player",
+  "factionIds": ["faction.azure_peak"],
+  "cultivation": { "realmId": "realm.foundation", "stageIndex": 1 },
+  "intimacy": {
+    "genderPresentation": "feminine",
+    "orientation": {
+      "towardMasculinePresentation": 0.72,
+      "towardFemininePresentation": 0.38,
+      "romanticDrive": 0.58
+    },
+    "loyaltyIntegrity": 74,
+    "relationshipStatus": "single",
+    "spouseCharacterIds": [],
+    "romanticInterestTargets": ["npc.gate_elder_chen"]
+  }
+}

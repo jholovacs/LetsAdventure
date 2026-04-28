@@ -1,0 +1,85 @@
+{
+  "templates": [
+    {
+      "id": "tpl.gate_warden",
+      "displayName": "Gate warden",
+      "sleepStartMinute": 1320,
+      "sleepEndMinute": 360,
+      "workStartMinute": 420,
+      "workEndMinute": 1200,
+      "hungerPerHour": 9,
+      "fatiguePerHourAwake": 8,
+      "fatiguePerHourSleeping": -38,
+      "socialPerHour": 5,
+      "recreationPerHour": 4,
+      "needIntensity": 1,
+      "workEthic": 1.25,
+      "workObligationPerHour": 14,
+      "activityUtilityBias": {
+        "work": 1.3,
+        "idle": 0.85,
+        "socialize": 0.9,
+        "recreation": 0.75,
+        "worship": 0.6,
+        "train": 0.5
+      },
+      "preferredFoodKinds": ["food_vendor", "market", "inn", "teahouse"],
+      "preferredSleepKinds": ["home", "inn"],
+      "preferredRecreationKinds": ["teahouse", "training_yard", "social_hall"]
+    },
+    {
+      "id": "tpl.merchant",
+      "displayName": "Itinerant merchant",
+      "sleepStartMinute": 1260,
+      "sleepEndMinute": 420,
+      "workStartMinute": 480,
+      "workEndMinute": 1140,
+      "hungerPerHour": 11,
+      "fatiguePerHourAwake": 7,
+      "fatiguePerHourSleeping": -32,
+      "socialPerHour": 7,
+      "recreationPerHour": 6,
+      "needIntensity": 1.1,
+      "workEthic": 0.95,
+      "workObligationPerHour": 10,
+      "activityUtilityBias": {
+        "work": 1.1,
+        "socialize": 1.35,
+        "recreation": 1.2,
+        "idle": 1,
+        "worship": 0.5,
+        "train": 0.4
+      },
+      "preferredFoodKinds": ["market", "food_vendor", "teahouse"],
+      "preferredSleepKinds": ["inn", "home"],
+      "preferredRecreationKinds": ["teahouse", "market", "social_hall"]
+    },
+    {
+      "id": "tpl.ascetic_disciple",
+      "displayName": "Outer disciple",
+      "sleepStartMinute": 1350,
+      "sleepEndMinute": 300,
+      "workStartMinute": 360,
+      "workEndMinute": 1080,
+      "hungerPerHour": 7,
+      "fatiguePerHourAwake": 9,
+      "fatiguePerHourSleeping": -40,
+      "socialPerHour": 3,
+      "recreationPerHour": 3,
+      "needIntensity": 0.75,
+      "workEthic": 1.15,
+      "workObligationPerHour": 16,
+      "activityUtilityBias": {
+        "train": 1.45,
+        "worship": 1.35,
+        "work": 1.2,
+        "idle": 1.1,
+        "socialize": 0.55,
+        "recreation": 0.5
+      },
+      "preferredFoodKinds": ["market", "food_vendor"],
+      "preferredSleepKinds": ["home"],
+      "preferredRecreationKinds": ["training_yard", "temple", "teahouse"]
+    }
+  ]
+}

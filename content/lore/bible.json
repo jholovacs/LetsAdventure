@@ -1,0 +1,47 @@
+{
+  "cosmology": {
+    "worldName": "Huāngmò Jiān",
+    "worldEpithet": "The Thin Place Between Heaven and Dust",
+    "summary": "The mortal cultivation world sits on a frayed seam of the Great Cycle. Qi rises from dragon veins and settles in marrow; the heavens answer ambition with tribulation lightning, not mercy.",
+    "upperRealmsNote": "Sages say the Upper Realm is not a place but a verdict.",
+    "daoConcepts": [
+      { "term": "Tiāndào", "gloss": "Heaven's pattern: consequence made legible." },
+      { "term": "Rěn", "gloss": "Endurance-as-power: suffering refined into intent." },
+      { "term": "Yuán", "gloss": "Root-nature: the spiritual color you were born with." },
+      { "term": "Karma of Borrowing", "gloss": "Every shortcut leaves a thread; pull enough and heaven tugs back." }
+    ]
+  },
+  "cultivationRealms": [
+    { "id": "realm.qi_vein", "order": 1, "name": "Qi Refinement", "epithet": "Opening the Meridians", "stages": ["Gathering Mist", "Channeling Current", "Tempering Breath", "Meridian Gate", "Small Circulation"], "blurb": "Learn to feel qi without dying from it." },
+    { "id": "realm.foundation", "order": 2, "name": "Foundation Establishment", "epithet": "Setting the Root", "stages": ["Earth Bed", "Stone Root", "Jade Stem", "Golden Core Seed", "Perfect Foundation"], "blurb": "The body becomes a vessel that remembers." },
+    { "id": "realm.core_formation", "order": 3, "name": "Core Formation", "epithet": "The Golden Core", "stages": ["False Core", "Solid Core", "Luminous Core", "Rotating Core", "Nine Revolutions"], "blurb": "Condense a sun inside the dantian." },
+    { "id": "realm.nascent_soul", "order": 4, "name": "Nascent Soul", "epithet": "The Second Life", "stages": ["Embryo", "Awakening", "Out-of-Body", "Soul Armament", "Yin-Yang Balance"], "blurb": "A second self that can flee death—once." },
+    { "id": "realm.spirit_severing", "order": 5, "name": "Spirit Severing", "epithet": "Cutting the Tethers", "stages": ["First Cut", "Second Cut", "Third Cut", "Severing the Self", "True Severing"], "blurb": "Each cut removes a weakness you thought was personality." },
+    { "id": "realm.void_refining", "order": 6, "name": "Void Refining", "epithet": "Body as Law", "stages": ["Hollow Flesh", "Star Marrow", "Void Skin", "Law Echo", "Almost Immortal"], "blurb": "The flesh learns to carry intent like scripture." },
+    { "id": "realm.dao_integration", "order": 7, "name": "Dao Integration", "epithet": "Writing Yourself Into Heaven", "stages": ["Touching Intent", "Dao Seed", "Dao Branch", "Dao Fruit", "Heaven's Acknowledgment"], "blurb": "You stop imitating techniques and start resembling truth." },
+    { "id": "realm.immortal_ascension", "order": 8, "name": "Ascension", "epithet": "The Last Tribulation", "stages": ["Calling the Bridge", "Walking the Bridge", "Beyond the Bridge"], "blurb": "An exile upward." }
+  ],
+  "regions": [
+    { "id": "region.jade_threshold", "name": "The Jade Threshold", "spiritualAspect": "wood / gentle yang", "blurb": "Terraced spirit farms and courier roads.", "neighbors": ["region.mist_lake", "region.iron_root_range"] },
+    { "id": "region.scarlet_wastes", "name": "Scarlet Wastes", "spiritualAspect": "fire / baleful yang", "blurb": "Glassed valleys and ash storms.", "neighbors": ["region.iron_root_range", "region.nether_fen"] },
+    { "id": "region.mist_lake", "name": "Mist Lake Principalities", "spiritualAspect": "water / yin veils", "blurb": "Island sects and ferry alliances.", "neighbors": ["region.jade_threshold", "region.silent_archive"] },
+    { "id": "region.iron_root_range", "name": "Iron Root Range", "spiritualAspect": "metal / stubborn earth", "blurb": "Cliff monasteries mine sword intent from stone.", "neighbors": ["region.jade_threshold", "region.scarlet_wastes", "region.silent_archive"] },
+    { "id": "region.silent_archive", "name": "Silent Archive Desert", "spiritualAspect": "time / sealed wind", "blurb": "Libraries buried like graves.", "neighbors": ["region.mist_lake", "region.iron_root_range"] },
+    { "id": "region.nether_fen", "name": "Nether Fen", "spiritualAspect": "corpse yin / miasma", "blurb": "Swamps where orthodox maps end.", "neighbors": ["region.scarlet_wastes"] }
+  ],
+  "sects": [
+    { "id": "sect.azure_peak", "name": "Azure Peak Sword Court", "alignment": "orthodox", "seat": "Iron Root Range — Cloudneedle Cliff", "doctrine": "The sword is honesty.", "signatureArts": ["Cloudneedle Seven Forms", "Heart Mirror Stance", "Thunder Draw"] },
+    { "id": "sect.crimson_lotus", "name": "Crimson Lotus Alchemy Hall", "alignment": "neutral", "seat": "Jade Threshold — Cinnabar Terrace", "doctrine": "Fire obeys whoever feeds it precisely.", "signatureArts": ["Nine-Beat Furnace Breath", "Lotus Coiling Seal", "Ashless Purification"] },
+    { "id": "sect.iron_pilgrim", "name": "Iron Pilgrim Monastery", "alignment": "pragmatic", "seat": "Scarlet Wastes border — Walking Forge Temple", "doctrine": "The body is the first treasure.", "signatureArts": ["Bone Bell Chant", "Furnace Body Tempering", "Step-Crater Stride"] },
+    { "id": "sect.white_tome", "name": "White Tome Academy", "alignment": "orthodox", "seat": "Silent Archive — Paper Dune Enclave", "doctrine": "Knowledge without restraint is a plague.", "signatureArts": ["Seal Script Arrays", "Silent Debate Palm", "Index of Forbidden Titles"] },
+    { "id": "sect.bone_river", "name": "Bone River Sect", "alignment": "heterodox", "seat": "Nether Fen — Raft Citadel of Names", "doctrine": "The dead owe the living nothing.", "signatureArts": ["Corpse Meridian Map", "River Ghost Step", "Debt-Tally Curse"] }
+  ],
+  "taboos": [
+    "Speaking a Nascent Soul's true name within a binding array.",
+    "Refining pills during your own tribulation—unless you enjoy lightning-flavored failure."
+  ],
+  "oaths": [
+    "May my core shatter if I betray this sect's granary seal.",
+    "I borrow heaven's qi; I repay with tribulation—when due."
+  ]
+}
