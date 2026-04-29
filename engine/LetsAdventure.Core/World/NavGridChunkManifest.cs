@@ -23,6 +23,15 @@ public sealed class NavGridChunkManifest
     /// <summary>Optional 2D overview image written beside chunks (e.g. preview.png).</summary>
     public string PreviewPngFile { get; set; } = "preview.png";
 
+    /// <summary>Subfolder (under the chunk store) with per-chunk PNGs for fast map preview; empty skips tile mode.</summary>
+    public string ChunkPreviewPngSubfolder { get; set; } = "preview_chunks";
+
+    /// <summary>BGRA nav cells per axis in each chunk PNG (1 = one pixel per nav cell). 0 = chunk PNGs not generated yet.</summary>
+    public int ChunkPreviewPixelsPerNavCell { get; set; }
+
+    /// <summary>Whether tiles used hill shading (must match preview UI for fast path). Null when unset in JSON (legacy).</summary>
+    public bool? ChunkPreviewHillshade { get; set; }
+
     public List<NavGridChunkLodEntry> Chunks { get; set; } = [];
 }
 

@@ -84,13 +84,14 @@ public static partial class ProceduralPhysicalWorldGenerator
         });
     }
 
-    public static PhysicalWorldGenerationResult Generate(ProceduralWorldSpec spec, IProgress<string>? progress = null) =>
-        GenerateCoastalOceanDrainage(spec, progress);
+    public static PhysicalWorldGenerationResult Generate(ProceduralWorldSpec spec, IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        GenerateCoastalOceanDrainage(spec, progress, cancellationToken);
 
     internal static void Report(IProgress<string>? progress, string message) => progress?.Report(message);
 
     private static PhysicalWorldGenerationResult GenerateCoastalOceanDrainage(ProceduralWorldSpec spec,
-        IProgress<string>? progress)
+        IProgress<string>? progress, CancellationToken cancellationToken)
     {
         var report = new PhysicalWorldGenerationReport();
         var messages = report.Messages;
@@ -103,6 +104,7 @@ public static partial class ProceduralPhysicalWorldGenerator
         var spanY = spec.MaxY - spec.MinY;
         Report(progress,
             $"[coastal] Phase 1 — land: nav/hydrology sampling grid {cols}×{rows} (~{cols * rows:N0} cells) across entire world XY span ({spanX:F0} × {spanY:F0} world units); each cell is ~{cell:F0} world units — resolution, not “map size”.");
+        cancellationToken.ThrowIfCancellationRequested();
         if (ShouldParallelize(cols, rows))
             Report(progress, "[coastal] Height-field synthesis uses multithreaded grid passes where safe (slope relaxation & graph search stay single-threaded).");
 
@@ -115,12 +117,14 @@ public static partial class ProceduralPhysicalWorldGenerator
         Report(progress,
             $"[coastal] Regional ruggedness, ridges, and {spec.MountainPeakCount} mountain massifs (steep cores preserved)…");
         ApplyRegionalRuggednessMountainsAndRidges(h, terrainRuggedness, mountainMask, cols, rows, spec, rng);
+        cancellationToken.ThrowIfCancellationRequested();
         Report(progress,
             $"[coastal] Slope relaxation ({spec.SlopeRelaxationIterations} iters, skipping mountain mask edges)…");
         EnforceMaxOrthogonalSlope(h, cols, rows, spec.MaxLandStepOrthogonal, spec.SlopeRelaxationIterations,
             mountainMask);
 
         Report(progress, "[coastal] Perimeter ocean mask (noise shoreline vs terrain)…");
+        cancellationToken.ThrowIfCancellationRequested();
         var isOcean = BuildPerimeterOceanMask(cols, rows, spec, cell, rng, h);
         var lakeId = new int[cols, rows];
 
@@ -138,10 +142,12 @@ public static partial class ProceduralPhysicalWorldGenerator
         }
 
         Report(progress, "[coastal] Smoothing land only (10 passes, ocean + mountains frozen, parallel)…");
+        cancellationToken.ThrowIfCancellationRequested();
         SmoothMaskedHeightField(h, freezeTerrainSmooth, cols, rows, passes: 10, alpha: 0.34, progress,
             "[coastal] Land smooth (pre-rivers)");
 
         Report(progress, "[coastal] Terrain depression lakes (contour bowls, inland; count from relief)…");
+        cancellationToken.ThrowIfCancellationRequested();
         PlaceContourDepressionLakes(h, cols, rows, spec, cell, rng, isOcean, lakeId);
 
         Report(progress, "[coastal] Slope pass after lakes…");
@@ -150,6 +156,7 @@ public static partial class ProceduralPhysicalWorldGenerator
 
         // --- Phase 2: drainage from terrain toward the ocean ---
         Report(progress, "[coastal] D8 flow + contributing area (terrain-only discharge proxy for channel widths)…");
+        cancellationToken.ThrowIfCancellationRequested();
         var drainage = ComputeDrainageField(h, isOcean, cols, rows, cell, progress);
         var contributingAreaM2 = drainage.ContributingAreaM2;
         var downC = drainage.DownC;
@@ -167,6 +174,7 @@ public static partial class ProceduralPhysicalWorldGenerator
         report.MajorRiversFormed = majorStemCount;
         Report(progress,
             $"[coastal] Drainage channels: {channelPaths} traced paths, {majorStemCount} main-stem-scale reaches (after calibration).");
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (spec.EnableRiverCorridorPoolLakes)
         {
@@ -177,6 +185,7 @@ public static partial class ProceduralPhysicalWorldGenerator
         }
 
         Report(progress, "[coastal] Lake outlet channels to nearest river…");
+        cancellationToken.ThrowIfCancellationRequested();
         ConnectLakesToNearestRiver(h, cols, rows, cell, spec, isOcean, lakeId, isRiver, riverPaths,
             contributingAreaM2, riverCellHalfWidthWorld, progress);
 
@@ -189,6 +198,7 @@ public static partial class ProceduralPhysicalWorldGenerator
 
         var isLake = new bool[cols, rows];
         ParallelForCols(cols, rows, (c, r) => isLake[c, r] = lakeId[c, r] > 0);
+        cancellationToken.ThrowIfCancellationRequested();
 
         Report(progress, "[coastal] Sea level, coastal creep, ocean floor carve…");
         var oceanWaterZ = EstimateOceanSurfaceZ(h, isOcean, cols, rows);
@@ -198,7 +208,10 @@ public static partial class ProceduralPhysicalWorldGenerator
         var lakeLevels = ComputeLakeWaterLevels(h, lakeId, cols, rows);
         Report(progress, $"[coastal] Carving lake beds ({lakeLevels.Count} lakes) and river channels…");
         foreach (var kv in lakeLevels)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             CarveLakeBedForId(h, cols, rows, lakeId, kv.Key, kv.Value, spec.LakeDepth);
+        }
 
         CarveAllRiverChannelBeds(h, cols, rows, cell, spec, riverPaths, isRiver, isOcean, lakeId, oceanWaterZ,
             riverCellHalfWidthWorld, progress);
@@ -206,6 +219,7 @@ public static partial class ProceduralPhysicalWorldGenerator
 
         var bedBeforeSurfaces = (double[,])h.Clone();
         Report(progress, "[coastal] Finalizing ocean / lake / river water surfaces…");
+        cancellationToken.ThrowIfCancellationRequested();
         FinalizeCoastalWaterSurfaces(h, cols, rows, isOcean, isLake, isRiver, lakeId, lakeLevels, oceanWaterZ,
             riverPaths, cell, spec, progress);
 
@@ -214,12 +228,14 @@ public static partial class ProceduralPhysicalWorldGenerator
             isWater[c, r] = isOcean[c, r] || isLake[c, r] || isRiver[c, r]);
 
         Report(progress, "[coastal] Land slope enforcement + river valley bias (all main stems)…");
+        cancellationToken.ThrowIfCancellationRequested();
         EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 24, progress,
             "[coastal] Land-only slope before river valleys");
         var landNearRiver = new bool[cols, rows];
         var stemTotal = riverPaths.Count;
         for (var si = 0; si < stemTotal; si++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var path = riverPaths[si];
             ApplyRiverValleyLandBias(h, isWater, path, cols, rows, spec, landNearRiver, progress,
                 $"[coastal] River valley bias stem {si + 1}/{stemTotal}");
@@ -232,10 +248,12 @@ public static partial class ProceduralPhysicalWorldGenerator
             freezePostWater[c, r] = isWater[c, r] || mountainMask[c, r]);
 
         Report(progress, "[coastal] Post-water smooth (8 passes, water + mountains frozen, parallel)…");
+        cancellationToken.ThrowIfCancellationRequested();
         SmoothMaskedHeightField(h, freezePostWater, cols, rows, passes: 8, alpha: 0.22, progress,
             "[coastal] Post-water smooth");
 
         Report(progress, "[coastal] Water network validation (ocean drainage + river profiles)…");
+        cancellationToken.ThrowIfCancellationRequested();
         ValidateWaterNetwork(isRiver, isLake, isOcean, cols, rows, report, h, riverPaths, cell, spec.TerrainAmplitude,
             progress);
         report.RiverTerminatesInLakeRegion = report.AllFlowingCellsReachStandingWater
@@ -253,6 +271,7 @@ public static partial class ProceduralPhysicalWorldGenerator
                 $"{report.RiverCenterlineDownstreamGradientViolations} river centerline segment(s) climb downstream beyond tolerance.");
 
         Report(progress, "[coastal] Building navigation grid (surface/bed Z, walkability, composition)…");
+        cancellationToken.ThrowIfCancellationRequested();
         var grid = BuildNavGrid(spec, cols, rows, cell, h, bedBeforeSurfaces, isWater, spec.MaxLandStepOrthogonal,
             report, landNearRiver, deltaSandMask, progress);
 

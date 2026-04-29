@@ -18,6 +18,8 @@ public static class NavGridChunkIO
 
     public static string ChunkFileName(int cx, int cy) => $"c_{cx:0000}_{cy:0000}.bin";
 
+    public static string ChunkPreviewPngFileName(int cx, int cy) => $"c_{cx:0000}_{cy:0000}.png";
+
     /// <summary>Export full in-memory grid to <paramref name="directory"/> (created if missing).</summary>
     public static NavGridChunkManifest ExportToDirectory(
         TerrainNavGridDefinition grid,

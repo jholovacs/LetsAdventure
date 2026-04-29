@@ -12,6 +12,9 @@ namespace LetsAdventure.WorldEditor.Services;
 /// <summary>Builds a batched Direct3D11 scene for <see cref="Viewport3DX"/> (GPU-friendly draw calls).</summary>
 public static class WorldSceneHelixBuilder
 {
+    /// <summary>World X/Y half-extent (meters) around the 3D focus for terrain, overlays, chunk streaming, and view scale.</summary>
+    public const double Editor3DTerrainClipHalfExtentMeters = 1000;
+
     /// <summary>
     /// World Z (up) is mapped to Helix Y; with strong XY shrink, multiply elevation scale so hills read in the editor.
     /// </summary>
@@ -64,7 +67,7 @@ public static class WorldSceneHelixBuilder
     /// (avoids far-plane clip and depth precision loss at 10⁶ world coordinates).
     /// </summary>
     public static bool TryGetViewMapping(PhysicalWorldDefinition world, out Vec3 originGroundWorld,
-        out float uniformScale, out float heightScale)
+        out float uniformScale, out float heightScale, double? localSceneHalfExtentM = null)
     {
         originGroundWorld = default;
         uniformScale = 1f;
@@ -73,8 +76,15 @@ public static class WorldSceneHelixBuilder
             return false;
         if (!TryGetSceneOriginGround(world, out originGroundWorld))
             return false;
-        var extent = Math.Max(navGrid.Columns * Math.Max(navGrid.CellSize, 1e-6),
-            navGrid.Rows * Math.Max(navGrid.CellSize, 1e-6));
+        double extent;
+        if (localSceneHalfExtentM is > 0)
+            extent = 2.0 * localSceneHalfExtentM.Value;
+        else
+        {
+            extent = Math.Max(navGrid.Columns * Math.Max(navGrid.CellSize, 1e-6),
+                navGrid.Rows * Math.Max(navGrid.CellSize, 1e-6));
+        }
+
         uniformScale = extent > 1e-6 ? (float)(3000.0 / extent) : 1f;
         heightScale = uniformScale * TerrainVerticalExaggeration;
         return true;
@@ -83,7 +93,7 @@ public static class WorldSceneHelixBuilder
     /// <summary>Horizontal scale only (orbit distance), matching terrain X/Z in view space.</summary>
     public static bool TryGetViewMapping(PhysicalWorldDefinition world, out Vec3 originGroundWorld,
         out float uniformScale) =>
-        TryGetViewMapping(world, out originGroundWorld, out uniformScale, out _);
+        TryGetViewMapping(world, out originGroundWorld, out uniformScale, out _, null);
 
     /// <summary>Camera / orbit: same transform as mesh (Helix Y = world Z with exaggeration).</summary>
     public static System.Windows.Media.Media3D.Point3D ScaledFocusFromWorld(Vec3 sceneOriginGround, Vec3 focusWorld,
@@ -98,12 +108,14 @@ public static class WorldSceneHelixBuilder
     public static GroupModel3D Build(PhysicalWorldDefinition world, WorldScene3DOptions opt)
     {
         var root = new GroupModel3D();
-        if (!TryCreateSceneTransform(world, out var originHelix, out var scale, out var hScale))
+        if (!TryCreateSceneTransform(world, opt, out var originHelix, out var scale, out var hScale))
         {
             originHelix = SharpDX.Vector3.Zero;
             scale = 1f;
             hScale = 1f;
         }
+
+        var hasClip = TryGetTerrainClipXY(opt, world, out var clipCx, out var clipCy, out var clipHalf);
 
         if (opt.Terrain)
         {
@@ -115,40 +127,182 @@ public static class WorldSceneHelixBuilder
         if (opt.Regions)
         {
             foreach (var reg in world.RegionBoundaries)
+            {
+                if (hasClip &&
+                    !Polyline2dBboxIntersectsClip(reg.Boundary.Vertices, clipCx, clipCy, clipHalf))
+                    continue;
                 AddBoundaryLines(root, reg.Boundary.Vertices, (reg.Boundary.ZMin + reg.Boundary.ZMax) * 0.5,
                     MediaColor.FromRgb(65, 145, 255), originHelix, scale, hScale);
+            }
         }
 
         if (opt.Territories)
         {
             foreach (var t in world.Territories)
+            {
+                if (hasClip &&
+                    !Polyline2dBboxIntersectsClip(t.Boundary.Vertices, clipCx, clipCy, clipHalf))
+                    continue;
                 AddBoundaryLines(root, t.Boundary.Vertices, (t.Boundary.ZMin + t.Boundary.ZMax) * 0.5,
                     MediaColor.FromRgb(255, 120, 60), originHelix, scale, hScale);
+            }
         }
 
         if (opt.Features)
         {
             foreach (var f in world.Features)
+            {
+                if (hasClip && !FeatureIntersectsClip(f, clipCx, clipCy, clipHalf))
+                    continue;
                 AddFeatureMeshes(root, f, world, originHelix, scale, hScale);
+            }
         }
 
         if (opt.NavGraph && world.Navigation.Graph is { } g)
-            AddNavGraphMeshes(root, g, originHelix, scale, hScale);
+            AddNavGraphMeshes(root, g, originHelix, scale, hScale, hasClip, clipCx, clipCy, clipHalf);
 
         return root;
     }
 
-    private static bool TryCreateSceneTransform(PhysicalWorldDefinition world, out SharpDX.Vector3 originHelix,
-        out float scale, out float heightScale)
+    private static bool TryCreateSceneTransform(PhysicalWorldDefinition world, WorldScene3DOptions opt,
+        out SharpDX.Vector3 originHelix, out float scale, out float heightScale)
     {
         originHelix = SharpDX.Vector3.Zero;
         scale = 1f;
         heightScale = 1f;
-        if (!TryGetViewMapping(world, out var ow, out scale, out heightScale))
+        double? localHalf = opt.TerrainClipHalfExtentM > 0 ? opt.TerrainClipHalfExtentM : null;
+        if (!TryGetViewMapping(world, out var ow, out scale, out heightScale, localHalf))
             return false;
         originHelix = WorldToHelix((float)ow.X, (float)ow.Y, (float)ow.Z);
         return true;
     }
+
+    private static bool TryGetTerrainClipXY(WorldScene3DOptions opt, PhysicalWorldDefinition world,
+        out double clipCx, out double clipCy, out double clipHalf)
+    {
+        clipCx = clipCy = clipHalf = 0;
+        if (opt.TerrainClipHalfExtentM <= 0)
+            return false;
+        clipHalf = opt.TerrainClipHalfExtentM;
+        Vec3? anchor = opt.TerrainDetailAnchorWorld ?? opt.TerrainPerspectiveAnchorWorld;
+        if (anchor is null && TryGetSceneOriginGround(world, out var og))
+            anchor = og;
+        if (anchor is null)
+        {
+            var b = world.GlobalBounds;
+            anchor = new Vec3 { X = (b.Min.X + b.Max.X) * 0.5, Y = (b.Min.Y + b.Max.Y) * 0.5, Z = 0 };
+        }
+
+        clipCx = anchor.Value.X;
+        clipCy = anchor.Value.Y;
+        return true;
+    }
+
+    private static bool AxisRectIntersectsClipSquare(double x0, double y0, double x1, double y1, double clipCx,
+        double clipCy, double clipHalf)
+    {
+        if (x0 > x1)
+            (x0, x1) = (x1, x0);
+        if (y0 > y1)
+            (y0, y1) = (y1, y0);
+        var xmin = clipCx - clipHalf;
+        var xmax = clipCx + clipHalf;
+        var ymin = clipCy - clipHalf;
+        var ymax = clipCy + clipHalf;
+        return x1 >= xmin && x0 <= xmax && y1 >= ymin && y0 <= ymax;
+    }
+
+    private static bool Polyline2dBboxIntersectsClip(IReadOnlyList<GeoVec2> verts, double clipCx, double clipCy,
+        double clipHalf)
+    {
+        if (verts.Count == 0)
+            return false;
+        var minX = verts[0].X;
+        var maxX = verts[0].X;
+        var minY = verts[0].Y;
+        var maxY = verts[0].Y;
+        for (var i = 1; i < verts.Count; i++)
+        {
+            var p = verts[i];
+            minX = Math.Min(minX, p.X);
+            maxX = Math.Max(maxX, p.X);
+            minY = Math.Min(minY, p.Y);
+            maxY = Math.Max(maxY, p.Y);
+        }
+
+        return AxisRectIntersectsClipSquare(minX, minY, maxX, maxY, clipCx, clipCy, clipHalf);
+    }
+
+    private static bool FeatureIntersectsClip(PhysicalTerrainFeature f, double clipCx, double clipCy, double clipHalf)
+    {
+        switch (f)
+        {
+            case PathCorridorFeature p:
+            {
+                if (p.Centerline.Count == 0)
+                    return false;
+                var bb = Polyline2dBbox(p.Centerline);
+                var pad = Math.Max(0, p.HalfWidth);
+                return AxisRectIntersectsClipSquare(bb.minX - pad, bb.minY - pad, bb.maxX + pad, bb.maxY + pad, clipCx,
+                    clipCy, clipHalf);
+            }
+            case StandingWaterFeature w:
+                return Polyline2dBboxIntersectsClip(w.Shoreline, clipCx, clipCy, clipHalf);
+            case FlowingWaterFeature fw:
+            {
+                if (fw.ChannelCenterline.Count == 0)
+                    return false;
+                var bb = Polyline2dBbox(fw.ChannelCenterline);
+                var pad = Math.Max(0, fw.ChannelHalfWidth);
+                return AxisRectIntersectsClipSquare(bb.minX - pad, bb.minY - pad, bb.maxX + pad, bb.maxY + pad, clipCx,
+                    clipCy, clipHalf);
+            }
+            case GroundPlateauFeature g:
+                return Polyline2dBboxIntersectsClip(g.Boundary, clipCx, clipCy, clipHalf);
+            case BuildingFootprintFeature b:
+                return Polyline2dBboxIntersectsClip(b.Footprint, clipCx, clipCy, clipHalf);
+            case SolidVolumeFeature s:
+                return AxisRectIntersectsClipSquare(s.Bounds.Min.X, s.Bounds.Min.Y, s.Bounds.Max.X, s.Bounds.Max.Y,
+                    clipCx, clipCy, clipHalf);
+            case MountainRidgeFeature m:
+            {
+                if (m.RidgeLine.Count == 0)
+                    return false;
+                var bb = Polyline2dBbox(m.RidgeLine);
+                var pad = Math.Max(0, m.CorridorHalfWidth);
+                return AxisRectIntersectsClipSquare(bb.minX - pad, bb.minY - pad, bb.maxX + pad, bb.maxY + pad, clipCx,
+                    clipCy, clipHalf);
+            }
+            case SkyVolumeFeature s:
+                return AxisRectIntersectsClipSquare(s.Bounds.Min.X, s.Bounds.Min.Y, s.Bounds.Max.X, s.Bounds.Max.Y,
+                    clipCx, clipCy, clipHalf);
+            case VegetationVolumeFeature v:
+                return Polyline2dBboxIntersectsClip(v.Boundary, clipCx, clipCy, clipHalf);
+            default:
+                return true;
+        }
+    }
+
+    private static (double minX, double minY, double maxX, double maxY) Polyline2dBbox(IReadOnlyList<GeoVec2> verts)
+    {
+        var minX = verts[0].X;
+        var maxX = verts[0].X;
+        var minY = verts[0].Y;
+        var maxY = verts[0].Y;
+        for (var i = 1; i < verts.Count; i++)
+        {
+            var p = verts[i];
+            minX = Math.Min(minX, p.X);
+            maxX = Math.Max(maxX, p.X);
+            minY = Math.Min(minY, p.Y);
+            maxY = Math.Max(maxY, p.Y);
+        }
+
+        return (minX, minY, maxX, maxY);
+    }
+
+    private static bool PointInsideClipSquare(double x, double y, double clipCx, double clipCy, double clipHalf) =>
+        x >= clipCx - clipHalf && x <= clipCx + clipHalf && y >= clipCy - clipHalf && y <= clipCy + clipHalf;
 
     private static SharpDX.Vector3 ToHelixRel(float worldX, float worldY, float worldZ, SharpDX.Vector3 originHelix,
         float xyScale, float heightScale)
@@ -215,7 +369,7 @@ public static class WorldSceneHelixBuilder
 
         var cols = grid.Columns;
         var rows = grid.Rows;
-        var expected = cols * rows;
+        var expected = (long)cols * rows;
         var cells = grid.Cells;
         if (cells is null || cells.Count < expected)
         {
@@ -224,6 +378,11 @@ public static class WorldSceneHelixBuilder
             var fb = BuildBoundsFallbackMesh(world, originHelix, scale, heightScale);
             return fb is null ? null : new GroupModel3D { Children = { fb } };
         }
+
+        // Entire nav grid in RAM: one subdivided mesh for every cell explodes GPU memory (O(columns×rows×subdiv²)).
+        // Above the chunked-export threshold, use the same coarse + near-detail strategy as on-disk chunks.
+        if (cells.Count >= expected && expected >= NavGridChunkIO.AutoExportCellThreshold)
+            return BuildFullGridWindowedTerrainLod(world, opt, grid, originHelix, scale, heightScale);
 
         var mesh = BuildBatchedTerrain(world, opt, originHelix, scale, heightScale);
         return mesh is null ? null : new GroupModel3D { Children = { mesh } };
@@ -317,6 +476,245 @@ public static class WorldSceneHelixBuilder
         return g.Children.Count == 0 ? null : g;
     }
 
+    /// <summary>
+    /// Large worlds with <see cref="TerrainNavGridDefinition.Cells"/> fully materialized: avoid <see cref="BuildBatchedTerrain"/>
+    /// (would allocate vertices for the entire grid). Reuses chunk-style coarse quads + ROI detail mesh.
+    /// </summary>
+    private static GroupModel3D? BuildFullGridWindowedTerrainLod(PhysicalWorldDefinition world, WorldScene3DOptions opt,
+        TerrainNavGridDefinition grid, SharpDX.Vector3 originHelix, float scale, float heightScale)
+    {
+        var cols = grid.Columns;
+        var rows = grid.Rows;
+        var cs = grid.CellSize <= 0 ? 1 : grid.CellSize;
+        var ox = grid.OriginX;
+        var oy = grid.OriginY;
+        var cw = NavGridChunkIO.DefaultChunkWidth;
+        var ch = NavGridChunkIO.DefaultChunkHeight;
+        var cells = grid.Cells!;
+        var (zMin, zMax) = ComputeCellElevationRange(cells);
+
+        ChunkIndexRanges? omitChunks = null;
+        MeshGeometryModel3D? detail = null;
+        var halfExt = Math.Max(0, opt.TerrainDetailCellHalfExtent);
+        if (halfExt > 0)
+        {
+            Vec3? anchor = opt.TerrainDetailAnchorWorld;
+            if (anchor is null && TryGetSceneOriginGround(world, out var og))
+                anchor = og;
+            anchor ??= new Vec3 { X = ox + cols * cs * 0.5, Y = oy + rows * cs * 0.5, Z = 0 };
+
+            var axw = anchor.Value.X;
+            var ayw = anchor.Value.Y;
+            var cCenter = (int)Math.Floor((axw - ox) / cs);
+            var rCenter = (int)Math.Floor((ayw - oy) / cs);
+            cCenter = Math.Clamp(cCenter, 0, cols - 1);
+            rCenter = Math.Clamp(rCenter, 0, rows - 1);
+
+            var maxSpan = Math.Clamp(opt.TerrainDetailMaxCellsPerAxis, 48, 512);
+            var cMin = Math.Max(0, cCenter - halfExt);
+            var cMax = Math.Min(cols - 1, cCenter + halfExt);
+            var rMin = Math.Max(0, rCenter - halfExt);
+            var rMax = Math.Min(rows - 1, rCenter + halfExt);
+
+            var spanC = cMax - cMin + 1;
+            if (spanC > maxSpan)
+            {
+                var excess = spanC - maxSpan;
+                cMin += excess / 2;
+                cMax = cMin + maxSpan - 1;
+                if (cMax > cols - 1)
+                {
+                    cMax = cols - 1;
+                    cMin = Math.Max(0, cMax - maxSpan + 1);
+                }
+            }
+
+            var spanR = rMax - rMin + 1;
+            if (spanR > maxSpan)
+            {
+                var excess = spanR - maxSpan;
+                rMin += excess / 2;
+                rMax = rMin + maxSpan - 1;
+                if (rMax > rows - 1)
+                {
+                    rMax = rows - 1;
+                    rMin = Math.Max(0, rMax - maxSpan + 1);
+                }
+            }
+
+            var cxMin = cMin / cw;
+            var cxMax = cMax / cw;
+            var cyMin = rMin / ch;
+            var cyMax = rMax / ch;
+
+            var col0Fine = cxMin * cw;
+            var col1Fine = Math.Min(cols - 1, (cxMax + 1) * cw - 1);
+            var row0Fine = cyMin * ch;
+            var row1Fine = Math.Min(rows - 1, (cyMax + 1) * ch - 1);
+
+            detail = BuildFullGridNavDetailMesh(opt, grid, originHelix, scale, heightScale, col0Fine, col1Fine, row0Fine,
+                row1Fine, zMin, zMax);
+            if (detail is not null)
+                omitChunks = new ChunkIndexRanges(cxMin, cxMax, cyMin, cyMax);
+        }
+
+        var coarse = BuildCoarseCellsLodTerrain(world, opt, grid, cw, ch, zMin, zMax, omitChunks, originHelix, scale,
+            heightScale);
+        var g = new GroupModel3D();
+        if (coarse is not null)
+            g.Children.Add(coarse);
+        if (detail is not null)
+            g.Children.Add(detail);
+        return g.Children.Count == 0 ? null : g;
+    }
+
+    private static (double zMin, double zMax) ComputeCellElevationRange(IReadOnlyList<NavCellDefinition> cells)
+    {
+        double zMin = double.MaxValue, zMax = double.MinValue;
+        foreach (var c in cells)
+        {
+            zMin = Math.Min(zMin, c.ElevationZ);
+            zMax = Math.Max(zMax, c.ElevationZ);
+        }
+
+        if (zMax < zMin)
+            return (0, 1);
+        return (zMin, zMax);
+    }
+
+    private static float AverageBlockElevation(IReadOnlyList<NavCellDefinition> cells, int cols, int col0, int row0,
+        int wCells, int hCells)
+    {
+        double sum = 0;
+        var n = 0;
+        for (var j = 0; j < hCells; j++)
+        {
+            for (var i = 0; i < wCells; i++)
+            {
+                sum += cells[(row0 + j) * cols + (col0 + i)].ElevationZ;
+                n++;
+            }
+        }
+
+        return n == 0 ? 0f : (float)(sum / n);
+    }
+
+    /// <summary>One flat quad per coarse block (same footprint as export chunks), optionally skipping the ROI covered by detail.</summary>
+    private static MeshGeometryModel3D? BuildCoarseCellsLodTerrain(PhysicalWorldDefinition world, WorldScene3DOptions opt,
+        TerrainNavGridDefinition grid, int cw, int ch, double zMin, double zMax, ChunkIndexRanges? omitChunks,
+        SharpDX.Vector3 originHelix, float scale, float heightScale)
+    {
+        var cols = grid.Columns;
+        var rows = grid.Rows;
+        var cells = grid.Cells!;
+        var cs = grid.CellSize <= 0 ? 1 : grid.CellSize;
+        var ox = grid.OriginX;
+        var oy = grid.OriginY;
+
+        var chunksX = (cols + cw - 1) / cw;
+        var chunksY = (rows + ch - 1) / ch;
+
+        var mapSpan = Math.Max(cols * cs, rows * cs);
+        var hazeNear = Math.Max(cs * 35, mapSpan * 0.018);
+        var hazeFar = Math.Max(mapSpan * 0.14, hazeNear * 4);
+        double ax, ay;
+        if (opt.TerrainPerspectiveAnchorWorld is { } aw)
+        {
+            ax = aw.X;
+            ay = aw.Y;
+        }
+        else
+        {
+            ax = ox + cols * cs * 0.5;
+            ay = oy + rows * cs * 0.5;
+        }
+
+        var useHaze = opt.TerrainAerialPerspective;
+        var hasClipCells = TryGetTerrainClipXY(opt, world, out var clipCxCells, out var clipCyCells, out var clipHalfCells);
+        var maxQuads = chunksX * chunksY;
+        var positions = new Vector3Collection(maxQuads * 4);
+        var colors = new Color4Collection(maxQuads * 4);
+        var indices = new IntCollection(maxQuads * 6);
+
+        var vi = 0;
+        for (var cy = 0; cy < chunksY; cy++)
+        {
+            for (var cx = 0; cx < chunksX; cx++)
+            {
+                if (omitChunks is { } om && cx >= om.CxMin && cx <= om.CxMax && cy >= om.CyMin && cy <= om.CyMax)
+                    continue;
+
+                var col0 = cx * cw;
+                var row0 = cy * ch;
+                var wCells = Math.Min(cw, cols - col0);
+                var hCells = Math.Min(ch, rows - row0);
+                if (wCells <= 0 || hCells <= 0)
+                    continue;
+
+                var x0c = (float)(ox + col0 * cs);
+                var y0c = (float)(oy + row0 * cs);
+                var x1c = (float)(ox + (col0 + wCells) * cs);
+                var y1c = (float)(oy + (row0 + hCells) * cs);
+                if (hasClipCells &&
+                    !AxisRectIntersectsClipSquare(x0c, y0c, x1c, y1c, clipCxCells, clipCyCells, clipHalfCells))
+                    continue;
+
+                var zh = AverageBlockElevation(cells, cols, col0, row0, wCells, hCells);
+                var syn = new NavCellDefinition
+                {
+                    ElevationZ = zh,
+                    Walkable = true,
+                    Composition = SurfaceComposition.Soil,
+                };
+                var baseCol = CellToColor4(syn, zMin, zMax);
+
+                var x0 = x0c;
+                var y0 = y0c;
+                var x1 = x1c;
+                var y1 = y1c;
+
+                void AddCorner(float wx, float wy)
+                {
+                    positions.Add(ToHelixRel(wx, wy, zh, originHelix, scale, heightScale));
+                    var col = baseCol;
+                    if (useHaze)
+                        col = ApplyAerialPerspective(col, wx, wy, ax, ay, hazeNear, hazeFar);
+                    colors.Add(col);
+                }
+
+                AddCorner(x0, y0);
+                AddCorner(x1, y0);
+                AddCorner(x1, y1);
+                AddCorner(x0, y1);
+
+                indices.Add(vi);
+                indices.Add(vi + 1);
+                indices.Add(vi + 2);
+                indices.Add(vi);
+                indices.Add(vi + 2);
+                indices.Add(vi + 3);
+                vi += 4;
+            }
+        }
+
+        if (positions.Count == 0)
+            return omitChunks is not null ? null : BuildBoundsFallbackMesh(world, originHelix, scale, heightScale);
+
+        var geom = new HelixMesh
+        {
+            Positions = positions,
+            TriangleIndices = indices,
+            Colors = colors,
+        };
+        geom.Normals = MeshGeometryHelper.CalculateNormals(geom);
+        return new MeshGeometryModel3D
+        {
+            Geometry = geom,
+            Material = TerrainVertexMaterial,
+            CullMode = SharpDX.Direct3D11.CullMode.Back,
+        };
+    }
+
     /// <summary>One flat shaded quad per on-disk chunk; optional <paramref name="omitChunks"/> skips chunks replaced by the detail mesh.</summary>
     private static MeshGeometryModel3D? BuildCoarseChunkLodTerrain(PhysicalWorldDefinition world, WorldScene3DOptions opt,
         NavGridChunkManifest manifest, SharpDX.Vector3 originHelix, float scale, float heightScale,
@@ -348,6 +746,7 @@ public static class WorldSceneHelixBuilder
         }
 
         var useHaze = opt.TerrainAerialPerspective;
+        var hasClipChunk = TryGetTerrainClipXY(opt, world, out var clipCxChunk, out var clipCyChunk, out var clipHalfChunk);
         var positions = new Vector3Collection(manifest.Chunks.Count * 4);
         var colors = new Color4Collection(manifest.Chunks.Count * 4);
         var indices = new IntCollection(manifest.Chunks.Count * 6);
@@ -369,6 +768,9 @@ public static class WorldSceneHelixBuilder
             var y0 = (float)(oy + row0 * cs);
             var x1 = (float)(ox + (col0 + wCells) * cs);
             var y1 = (float)(oy + (row0 + hCells) * cs);
+            if (hasClipChunk &&
+                !AxisRectIntersectsClipSquare(x0, y0, x1, y1, clipCxChunk, clipCyChunk, clipHalfChunk))
+                continue;
             var zh = (float)e.AvgZ;
 
             var syn = SyntheticCellForChunkLod(e);
@@ -559,6 +961,145 @@ public static class WorldSceneHelixBuilder
         };
     }
 
+    private static MeshGeometryModel3D? BuildFullGridNavDetailMesh(
+        WorldScene3DOptions opt,
+        TerrainNavGridDefinition grid,
+        SharpDX.Vector3 originHelix,
+        float scale,
+        float heightScale,
+        int col0,
+        int col1,
+        int row0,
+        int row1,
+        double zMin,
+        double zMax)
+    {
+        var cols = grid.Columns;
+        var rows = grid.Rows;
+        var cells = grid.Cells!;
+        var patchCols = col1 - col0 + 1;
+        var patchRows = row1 - row0 + 1;
+        if (patchCols < 1 || patchRows < 1)
+            return null;
+
+        var cs = grid.CellSize <= 0 ? 1 : grid.CellSize;
+        var ox = grid.OriginX + col0 * cs;
+        var oy = grid.OriginY + row0 * cs;
+
+        var patchCells = new NavCellDefinition[patchCols * patchRows];
+        for (var j = 0; j < patchRows; j++)
+        {
+            for (var i = 0; i < patchCols; i++)
+                patchCells[j * patchCols + i] = cells[(row0 + j) * cols + (col0 + i)];
+        }
+
+        var sub = Math.Clamp(opt.TerrainSubdivisionsPerCell, 1, 8);
+        var smoothPasses = Math.Clamp(6 + sub * 2, 8, 18);
+        var smoothAlpha = Math.Clamp(0.48f + sub * 0.028f, 0.48f, 0.62f);
+        var cornerZ = BuildSmoothedCornerHeights(patchCells, patchCols, patchRows, smoothPasses, smoothAlpha);
+
+        var mapSpan = Math.Max(cols * cs, rows * cs);
+        var hazeNear = Math.Max(cs * 35, mapSpan * 0.018);
+        var hazeFar = Math.Max(mapSpan * 0.14, hazeNear * 4);
+        double ax, ay;
+        if (opt.TerrainPerspectiveAnchorWorld is { } aw)
+        {
+            ax = aw.X;
+            ay = aw.Y;
+        }
+        else
+        {
+            ax = grid.OriginX + cols * cs * 0.5;
+            ay = grid.OriginY + rows * cs * 0.5;
+        }
+
+        var useHaze = opt.TerrainAerialPerspective;
+        var vx = patchCols * sub + 1;
+        var vy = patchRows * sub + 1;
+        var cellColors = new Color4[patchCols * patchRows];
+        for (var j = 0; j < patchRows; j++)
+        {
+            for (var i = 0; i < patchCols; i++)
+                cellColors[j * patchCols + i] = CellToColor4(patchCells[j * patchCols + i], zMin, zMax);
+        }
+
+        Color4 CellColorAt(int ci, int cj) =>
+            cellColors[Math.Clamp(cj, 0, patchRows - 1) * patchCols + Math.Clamp(ci, 0, patchCols - 1)];
+
+        var positions = new Vector3Collection(vx * vy);
+        var colors = new Color4Collection(vx * vy);
+        var indices = new IntCollection(patchCols * patchRows * sub * sub * 6);
+
+        var dCell = cs / sub;
+        for (var gj = 0; gj <= patchRows * sub; gj++)
+        {
+            for (var gi = 0; gi <= patchCols * sub; gi++)
+            {
+                var fc = gi / (double)sub;
+                var fr = gj / (double)sub;
+                var i0 = Math.Clamp((int)Math.Floor(fc + 1e-9), 0, patchCols - 1);
+                var j0 = Math.Clamp((int)Math.Floor(fr + 1e-9), 0, patchRows - 1);
+                var u = (float)Math.Clamp(fc - i0, 0, 1);
+                var v = (float)Math.Clamp(fr - j0, 0, 1);
+                var ci1 = Math.Min(i0 + 1, patchCols - 1);
+                var cj1 = Math.Min(j0 + 1, patchRows - 1);
+
+                var z00 = cornerZ[i0, j0];
+                var z10 = cornerZ[i0 + 1, j0];
+                var z01 = cornerZ[i0, j0 + 1];
+                var z11 = cornerZ[i0 + 1, j0 + 1];
+                var zh = BilinearScalar(z00, z10, z01, z11, u, v);
+
+                var wx = (float)(ox + gi * dCell);
+                var wy = (float)(oy + gj * dCell);
+                positions.Add(ToHelixRel(wx, wy, zh, originHelix, scale, heightScale));
+                var col = BilinearColor4(
+                    CellColorAt(i0, j0),
+                    CellColorAt(ci1, j0),
+                    CellColorAt(i0, cj1),
+                    CellColorAt(ci1, cj1),
+                    u,
+                    v);
+                if (useHaze)
+                    col = ApplyAerialPerspective(col, wx, wy, ax, ay, hazeNear, hazeFar);
+                colors.Add(col);
+            }
+        }
+
+        int V(int gix, int gjy) => gjy * vx + gix;
+        for (var gj = 0; gj < patchRows * sub; gj++)
+        {
+            for (var gi = 0; gi < patchCols * sub; gi++)
+            {
+                var i00 = V(gi, gj);
+                var i10 = i00 + 1;
+                var i01 = i00 + vx;
+                var i11 = i01 + 1;
+                indices.Add(i00);
+                indices.Add(i10);
+                indices.Add(i11);
+                indices.Add(i00);
+                indices.Add(i11);
+                indices.Add(i01);
+            }
+        }
+
+        var geom = new HelixMesh
+        {
+            Positions = positions,
+            TriangleIndices = indices,
+            Colors = colors,
+        };
+        geom.Normals = MeshGeometryHelper.CalculateNormals(geom);
+
+        return new MeshGeometryModel3D
+        {
+            Geometry = geom,
+            Material = TerrainVertexMaterial,
+            CullMode = SharpDX.Direct3D11.CullMode.Back,
+        };
+    }
+
     private static NavCellDefinition SyntheticCellForChunkLod(NavGridChunkLodEntry e)
     {
         var water = e.WaterFraction01 >= 0.45;
@@ -615,9 +1156,6 @@ public static class WorldSceneHelixBuilder
             ay = oy + rows * cs * 0.5;
         }
 
-        var useHaze = opt.TerrainAerialPerspective;
-        var vx = cols * sub + 1;
-        var vy = rows * sub + 1;
         var cellColors = new Color4[cols * rows];
         for (var j = 0; j < rows; j++)
         {
@@ -627,17 +1165,44 @@ public static class WorldSceneHelixBuilder
 
         Color4 CellColorAt(int ci, int cj) => cellColors[Math.Clamp(cj, 0, rows - 1) * cols + Math.Clamp(ci, 0, cols - 1)];
 
-        var positions = new Vector3Collection(vx * vy);
-        var colors = new Color4Collection(vx * vy);
-        var indices = new IntCollection(cols * rows * sub * sub * 6);
-
-        var dCell = cs / sub;
-        for (var gj = 0; gj <= rows * sub; gj++)
+        var useHaze = opt.TerrainAerialPerspective;
+        var subF = (double)sub;
+        var dCell = cs / subF;
+        var giLo = 0;
+        var giHi = cols * sub;
+        var gjLo = 0;
+        var gjHi = rows * sub;
+        if (TryGetTerrainClipXY(opt, world, out var tcx, out var tcy, out var th))
         {
-            for (var gi = 0; gi <= cols * sub; gi++)
+            giLo = (int)Math.Floor((tcx - th - ox) / dCell);
+            giHi = (int)Math.Ceiling((tcx + th - ox) / dCell);
+            gjLo = (int)Math.Floor((tcy - th - oy) / dCell);
+            gjHi = (int)Math.Ceiling((tcy + th - oy) / dCell);
+            giLo = Math.Clamp(giLo, 0, cols * sub);
+            giHi = Math.Clamp(giHi, 0, cols * sub);
+            gjLo = Math.Clamp(gjLo, 0, rows * sub);
+            gjHi = Math.Clamp(gjHi, 0, rows * sub);
+            if (giHi <= giLo)
+                giHi = Math.Min(giLo + 1, cols * sub);
+            if (gjHi <= gjLo)
+                gjHi = Math.Min(gjLo + 1, rows * sub);
+        }
+
+        var vxLocal = giHi - giLo + 1;
+        var vyLocal = gjHi - gjLo + 1;
+        var positions = new Vector3Collection(vxLocal * vyLocal);
+        var colors = new Color4Collection(vxLocal * vyLocal);
+        var quadCols = Math.Max(0, giHi - giLo);
+        var quadRows = Math.Max(0, gjHi - gjLo);
+        var indices = new IntCollection(quadCols * quadRows * 6);
+
+        int V(int gix, int gjy) => (gjy - gjLo) * vxLocal + (gix - giLo);
+        for (var gj = gjLo; gj <= gjHi; gj++)
+        {
+            for (var gi = giLo; gi <= giHi; gi++)
             {
-                var fc = gi / (double)sub;
-                var fr = gj / (double)sub;
+                var fc = gi / subF;
+                var fr = gj / subF;
                 var i0 = Math.Clamp((int)Math.Floor(fc + 1e-9), 0, cols - 1);
                 var j0 = Math.Clamp((int)Math.Floor(fr + 1e-9), 0, rows - 1);
                 var u = (float)Math.Clamp(fc - i0, 0, 1);
@@ -667,14 +1232,13 @@ public static class WorldSceneHelixBuilder
             }
         }
 
-        int V(int gix, int gjy) => gjy * vx + gix;
-        for (var gj = 0; gj < rows * sub; gj++)
+        for (var gj = gjLo; gj < gjHi; gj++)
         {
-            for (var gi = 0; gi < cols * sub; gi++)
+            for (var gi = giLo; gi < giHi; gi++)
             {
                 var i00 = V(gi, gj);
                 var i10 = i00 + 1;
-                var i01 = i00 + vx;
+                var i01 = i00 + vxLocal;
                 var i11 = i01 + 1;
                 indices.Add(i00);
                 indices.Add(i10);
@@ -1097,12 +1661,14 @@ public static class WorldSceneHelixBuilder
     }
 
     private static void AddNavGraphMeshes(GroupModel3D root, NavigationGraphDefinition g, SharpDX.Vector3 originHelix,
-        float xyScale, float heightScale)
+        float xyScale, float heightScale, bool clip, double clipCx, double clipCy, double clipHalf)
     {
         var posById = g.Nodes.ToDictionary(n => n.Id, n => n.Position, StringComparer.Ordinal);
         foreach (var n in g.Nodes)
         {
             var p = n.Position;
+            if (clip && !PointInsideClipSquare(p.X, p.Y, clipCx, clipCy, clipHalf))
+                continue;
             var ctr = ToHelixRel((float)p.X, (float)p.Y, (float)p.Z, originHelix, xyScale, heightScale);
             AddSphereApprox(root, ctr, Math.Max(0.25f, 2f * xyScale), MediaColor.FromRgb(255, 220, 60));
         }
@@ -1110,6 +1676,12 @@ public static class WorldSceneHelixBuilder
         foreach (var e in g.Edges)
         {
             if (!posById.TryGetValue(e.FromId, out var a) || !posById.TryGetValue(e.ToId, out var b))
+                continue;
+            if (clip &&
+                !AxisRectIntersectsClipSquare(
+                    Math.Min(a.X, b.X), Math.Min(a.Y, b.Y),
+                    Math.Max(a.X, b.X), Math.Max(a.Y, b.Y),
+                    clipCx, clipCy, clipHalf))
                 continue;
             var p0 = ToHelixRel((float)a.X, (float)a.Y, (float)a.Z, originHelix, xyScale, heightScale);
             var p1 = ToHelixRel((float)b.X, (float)b.Y, (float)b.Z, originHelix, xyScale, heightScale);

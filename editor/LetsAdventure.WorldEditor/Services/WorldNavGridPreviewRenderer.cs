@@ -1,4 +1,5 @@
 using System.IO;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -6,6 +7,9 @@ using System.Windows.Media.Imaging;
 using LetsAdventure.Core.World;
 
 namespace LetsAdventure.WorldEditor.Services;
+
+/// <summary>Raw BGRA nav-patch raster built off the UI thread; use <see cref="WorldNavGridPreviewRenderer.CreateNavGridPatchImage"/> on the dispatcher.</summary>
+public readonly record struct NavGridPatchBitmapData(int PixelWidth, int PixelHeight, byte[] BgraPixels);
 
 /// <summary>High-detail 2D preview: one pixel per nav cell with composition, vegetation, and optional hillshade.</summary>
 public static class WorldNavGridPreviewRenderer
@@ -25,7 +29,7 @@ public static class WorldNavGridPreviewRenderer
         var outR = (rows + stepR - 1) / stepR;
 
         var cells = grid.Cells;
-        var (zMin, zMax) = ElevRange(cells, cols, rows);
+        var (zMin, zMax) = NavGridMapPreviewRaster.ElevRange(cells, cols, rows);
         var zSpan = Math.Max(1e-3, zMax - zMin);
         var stride = outC * 4;
         var buffer = new byte[stride * outR];
@@ -36,7 +40,8 @@ public static class WorldNavGridPreviewRenderer
             {
                 var c = Math.Min(cols - 1, oc * stepC);
                 var cell = cells[r * cols + c];
-                var (b, g, r8, a) = PixelBgra(cell, c, r, cols, rows, cells, zMin, zSpan, hillshade);
+                var (b, g, r8, a) = NavGridMapPreviewRaster.PixelBgra(cell, c, r, cols, rows, cells, zMin, zSpan,
+                    hillshade);
                 var o = or * stride + oc * 4;
                 buffer[o] = b;
                 buffer[o + 1] = g;
@@ -57,7 +62,7 @@ public static class WorldNavGridPreviewRenderer
 
     /// <summary>
     /// Horizontal / vertical preview pixels per world meter so vector overlays align with the nav raster
-    /// (<paramref name="rasterCellPixels"/> per raster pixel; full grid or chunked preview.png).
+    /// (<paramref name="rasterCellPixels"/> per raster “cell pixel” slider; full grid, chunked manifest, or overview PNG).
     /// </summary>
     public static bool TryGetMapPreviewPixelsPerWorldMeter(
         PhysicalWorldDefinition world,
@@ -85,33 +90,51 @@ public static class WorldNavGridPreviewRenderer
             return true;
         }
 
+        // Chunked world in this session — scale from nav cell size (patch rasters do not need preview.png).
+        if (world.NavGridCellSource is not null)
+        {
+            var s = rasterCellPixels / cs;
+            pixelsPerWorldMeterX = s;
+            pixelsPerWorldMeterY = s;
+            return true;
+        }
+
         if (string.IsNullOrEmpty(chunkStoreDirectory))
             return false;
         if (!NavGridChunkIO.TryLoadManifest(chunkStoreDirectory, out var manifest) || manifest is null)
             return false;
+
         var pngPath = Path.Combine(chunkStoreDirectory, manifest.PreviewPngFile);
-        if (!File.Exists(pngPath))
-            return false;
-
-        int iw, ih;
-        try
+        if (File.Exists(pngPath))
         {
-            using var stream = File.OpenRead(pngPath);
-            var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
-            var frame = decoder.Frames[0];
-            iw = frame.PixelWidth;
-            ih = frame.PixelHeight;
-        }
-        catch
-        {
-            return false;
+            int iw, ih;
+            try
+            {
+                using var stream = File.OpenRead(pngPath);
+                var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
+                var frame = decoder.Frames[0];
+                iw = frame.PixelWidth;
+                ih = frame.PixelHeight;
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (iw < 1 || ih < 1)
+                return false;
+            pixelsPerWorldMeterX = iw * rasterCellPixels / (cols * cs);
+            pixelsPerWorldMeterY = ih * rasterCellPixels / (rows * cs);
+            return pixelsPerWorldMeterX > 0 && pixelsPerWorldMeterY > 0;
         }
 
-        if (iw < 1 || ih < 1)
-            return false;
-        pixelsPerWorldMeterX = iw * rasterCellPixels / (cols * cs);
-        pixelsPerWorldMeterY = ih * rasterCellPixels / (rows * cs);
-        return pixelsPerWorldMeterX > 0 && pixelsPerWorldMeterY > 0;
+        // Manifest on disk but overview PNG not written yet (e.g. fresh baseline) — same geometry as in-memory grid.
+        {
+            var s = rasterCellPixels / cs;
+            pixelsPerWorldMeterX = s;
+            pixelsPerWorldMeterY = s;
+            return true;
+        }
     }
 
     /// <summary>Loads <paramref name="chunkStoreDirectory"/>/preview.png (or manifest name) when cells are external.</summary>
@@ -121,7 +144,28 @@ public static class WorldNavGridPreviewRenderer
         bool hillshade,
         double marginOx,
         double marginOy,
-        string? chunkStoreDirectory = null)
+        string? chunkStoreDirectory = null) =>
+        TryBuildNavGridImage(world, cellPixels, hillshade, marginOx, marginOy, chunkStoreDirectory,
+            fullGridOnly: true);
+
+    /// <summary>
+    /// When <paramref name="fullGridOnly"/> is true, always builds the full nav raster (legacy).
+    /// When false and <paramref name="patch"/> is set, renders only that cell range at <paramref name="superSample"/>×
+    /// bitmap pixels per nav cell (for zoomed map preview).
+    /// </summary>
+    public static Image? TryBuildNavGridImage(
+        PhysicalWorldDefinition world,
+        double cellPixels,
+        bool hillshade,
+        double marginOx,
+        double marginOy,
+        string? chunkStoreDirectory,
+        bool fullGridOnly,
+        int patchC0 = 0,
+        int patchC1 = 0,
+        int patchR0 = 0,
+        int patchR1 = 0,
+        int superSample = 1)
     {
         var grid = world.Navigation.Grid;
         if (grid is null || grid.Columns < 1 || grid.Rows < 1)
@@ -129,6 +173,32 @@ public static class WorldNavGridPreviewRenderer
 
         if (grid.Cells is null || grid.Cells.Count < grid.Columns * grid.Rows)
         {
+            if (!fullGridOnly && world.NavGridCellSource is INavGridCellSource nkSrc
+                && patchC0 <= patchC1 && patchR0 <= patchR1 && superSample >= 1)
+            {
+                var pc = patchC1 - patchC0 + 1;
+                var pr = patchR1 - patchR0 + 1;
+                if (pc > 0 && pr > 0 && (superSample > 1 || pc < grid.Columns || pr < grid.Rows))
+                {
+                    if (!string.IsNullOrEmpty(chunkStoreDirectory) &&
+                        NavGridChunkIO.TryLoadManifest(chunkStoreDirectory, out var mtiles) && mtiles is not null &&
+                        mtiles.ChunkPreviewPixelsPerNavCell > 0)
+                    {
+                        var fromTiles = TryComposePatchFromChunkPreviewPngs(chunkStoreDirectory, mtiles, patchC0,
+                            patchC1, patchR0, patchR1, superSample, hillshade, progress: null,
+                            CancellationToken.None);
+                        if (fromTiles is not null)
+                            return CreateNavGridPatchImage(fromTiles.Value, cellPixels, marginOx, marginOy, patchC0,
+                                patchR0, pc, pr);
+                    }
+
+                    var fromChunks = TryBuildNavGridPatchFromChunkSource(grid, nkSrc, patchC0, patchC1, patchR0, patchR1,
+                        cellPixels, superSample, hillshade, marginOx, marginOy);
+                    if (fromChunks is not null)
+                        return fromChunks;
+                }
+            }
+
             if (string.IsNullOrEmpty(chunkStoreDirectory))
                 return null;
             if (!NavGridChunkIO.TryLoadManifest(chunkStoreDirectory, out var manifest) || manifest is null)
@@ -165,12 +235,31 @@ public static class WorldNavGridPreviewRenderer
 
         var cols = grid.Columns;
         var rows = grid.Rows;
-        var cells = grid.Cells;
+        var cells = grid.Cells!;
+        superSample = Math.Clamp(superSample, 1, 8);
+
+        var isFullExtents = patchC0 == 0 && patchC1 == cols - 1 && patchR0 == 0 && patchR1 == rows - 1;
+        var pcPatch = patchC1 - patchC0 + 1;
+        var prPatch = patchR1 - patchR0 + 1;
+        var patchBitmapPixels = (long)pcPatch * prPatch * superSample * superSample;
+        const long maxPatchPixels = 14_000_000L;
+        // Strict subset, or full grid at >1× when the supersampled bitmap stays within the pixel budget.
+        var usePatch = !fullGridOnly && patchC0 <= patchC1 && patchR0 <= patchR1
+                       && (!isFullExtents || (superSample > 1 && patchBitmapPixels <= maxPatchPixels));
+        if (usePatch)
+        {
+            var patchImage = TryBuildNavGridImageFromCellPatchInMemory(
+                cells, cols, rows, patchC0, patchC1, patchR0, patchR1, cellPixels, superSample, hillshade, marginOx,
+                marginOy);
+            if (patchImage is not null)
+                return patchImage;
+        }
+
         var bmp = new WriteableBitmap(cols, rows, 96, 96, PixelFormats.Bgra32, null);
         var stride = cols * 4;
         var buffer = new byte[stride * rows];
 
-        var (zMin, zMax) = ElevRange(cells, cols, rows);
+        var (zMin, zMax) = NavGridMapPreviewRaster.ElevRange(cells, cols, rows);
         var zSpan = Math.Max(1e-3, zMax - zMin);
 
         for (var r = 0; r < rows; r++)
@@ -178,7 +267,8 @@ public static class WorldNavGridPreviewRenderer
             for (var c = 0; c < cols; c++)
             {
                 var cell = cells[r * cols + c];
-                var (b, g, r8, a) = PixelBgra(cell, c, r, cols, rows, cells, zMin, zSpan, hillshade);
+                var (b, g, r8, a) = NavGridMapPreviewRaster.PixelBgra(cell, c, r, cols, rows, cells, zMin, zSpan,
+                    hillshade);
                 var o = r * stride + c * 4;
                 buffer[o] = b;
                 buffer[o + 1] = g;
@@ -202,215 +292,413 @@ public static class WorldNavGridPreviewRenderer
         return img;
     }
 
-    private static (double zMin, double zMax) ElevRange(IReadOnlyList<NavCellDefinition> cells, int cols, int rows)
+    /// <summary>Builds BGRA patch pixels for chunked or in-memory nav grids (for background encoding).</summary>
+    public static bool TryEncodeNavGridPatchForMapPreview(
+        PhysicalWorldDefinition world,
+        bool hillshade,
+        string? chunkStoreDirectory,
+        bool fullGridOnly,
+        int patchC0,
+        int patchC1,
+        int patchR0,
+        int patchR1,
+        int superSample,
+        IProgress<int>? progress,
+        CancellationToken cancellationToken,
+        out NavGridPatchBitmapData? data)
     {
-        var zMin = double.MaxValue;
-        var zMax = double.MinValue;
-        for (var i = 0; i < cols * rows; i++)
+        data = null;
+        var grid = world.Navigation.Grid;
+        if (grid is null || grid.Columns < 1 || grid.Rows < 1)
+            return false;
+
+        superSample = Math.Clamp(superSample, 1, 8);
+        var cols = grid.Columns;
+        var rows = grid.Rows;
+        var isFullExtents = patchC0 == 0 && patchC1 == cols - 1 && patchR0 == 0 && patchR1 == rows - 1;
+        var pcPatch = patchC1 - patchC0 + 1;
+        var prPatch = patchR1 - patchR0 + 1;
+        var patchBitmapPixels = (long)pcPatch * prPatch * superSample * superSample;
+        const long maxPatchPixels = 14_000_000L;
+        var usePatch = !fullGridOnly && patchC0 <= patchC1 && patchR0 <= patchR1
+                       && (!isFullExtents || (superSample > 1 && patchBitmapPixels <= maxPatchPixels));
+        if (!usePatch)
+            return false;
+
+        if (grid.Cells is null || grid.Cells.Count < grid.Columns * grid.Rows)
         {
-            var c = cells[i];
-            var z = c.ElevationZ;
-            if (!c.Walkable && c.FluidDepth > 0.01)
-                z = c.WaterSurfaceZ;
-            zMin = Math.Min(zMin, z);
-            zMax = Math.Max(zMax, z);
+            if (world.NavGridCellSource is not INavGridCellSource nkSrc)
+                return false;
+            var pc = patchC1 - patchC0 + 1;
+            var pr = patchR1 - patchR0 + 1;
+            if (pc < 1 || pr < 1 || !(superSample > 1 || pc < cols || pr < rows))
+                return false;
+
+            var storeDir = chunkStoreDirectory;
+            if (string.IsNullOrEmpty(storeDir) && world.NavGridCellSource is NavGridChunkCellSource ncs)
+                storeDir = ncs.Directory;
+            if (!string.IsNullOrEmpty(storeDir) &&
+                NavGridChunkIO.TryLoadManifest(storeDir, out var manT) && manT is not null &&
+                manT.ChunkPreviewPixelsPerNavCell > 0)
+            {
+                var fromTiles = TryComposePatchFromChunkPreviewPngs(storeDir, manT, patchC0, patchC1, patchR0, patchR1,
+                    superSample, hillshade, progress, cancellationToken);
+                if (fromTiles is not null)
+                {
+                    data = fromTiles;
+                    return true;
+                }
+            }
+
+            data = TryFillNavGridPatchBufferFromChunkSource(grid, nkSrc, patchC0, patchC1, patchR0, patchR1, superSample,
+                hillshade, progress, cancellationToken);
+            return data is not null;
         }
 
-        if (zMin > zMax)
-            return (0, 1);
-        return (zMin, zMax);
+        var cells = grid.Cells!;
+        data = TryFillNavGridPatchBufferInMemory(cells, cols, rows, patchC0, patchC1, patchR0, patchR1, superSample,
+            hillshade, progress, cancellationToken);
+        return data is not null;
     }
 
-    private static (byte b, byte g, byte r, byte a) PixelBgra(
-        NavCellDefinition cell,
-        int c,
-        int r,
+    /// <summary>Creates a WPF <see cref="Image"/> from encoded patch bytes (dispatcher thread).</summary>
+    public static Image? CreateNavGridPatchImage(
+        NavGridPatchBitmapData data,
+        double cellPixels,
+        double marginOx,
+        double marginOy,
+        int patchC0,
+        int patchR0,
+        int patchCols,
+        int patchRows)
+    {
+        if (data.PixelWidth < 1 || data.PixelHeight < 1 || data.BgraPixels.Length < (long)data.PixelWidth * data.PixelHeight * 4)
+            return null;
+        var wBmp = new WriteableBitmap(data.PixelWidth, data.PixelHeight, 96, 96, PixelFormats.Bgra32, null);
+        wBmp.WritePixels(new Int32Rect(0, 0, data.PixelWidth, data.PixelHeight), data.BgraPixels, data.PixelWidth * 4, 0);
+        var img = new Image
+        {
+            Source = wBmp,
+            Width = patchCols * cellPixels,
+            Height = patchRows * cellPixels,
+            Stretch = Stretch.Fill,
+        };
+        Canvas.SetLeft(img, marginOx + patchC0 * cellPixels);
+        Canvas.SetTop(img, marginOy + patchR0 * cellPixels);
+        RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
+        RenderOptions.SetEdgeMode(img, EdgeMode.Aliased);
+        return img;
+    }
+
+    private static NavGridPatchBitmapData? TryFillNavGridPatchBufferInMemory(
+        IReadOnlyList<NavCellDefinition> cells,
         int cols,
         int rows,
+        int patchC0,
+        int patchC1,
+        int patchR0,
+        int patchR1,
+        int superSample,
+        bool hillshade,
+        IProgress<int>? progress,
+        CancellationToken cancellationToken)
+    {
+        var pc = patchC1 - patchC0 + 1;
+        var pr = patchR1 - patchR0 + 1;
+        if (pc < 1 || pr < 1)
+            return null;
+        var bw = pc * superSample;
+        var bh = pr * superSample;
+        if (bw < 1 || bh < 1 || bw > 20000 || bh > 20000)
+            return null;
+
+        var bytes = NavGridMapPreviewRaster.TryEncodePatchBgra(cells, cols, rows, patchC0, patchC1, patchR0, patchR1,
+            superSample, hillshade, progress, cancellationToken);
+        if (bytes is null)
+            return null;
+        return new NavGridPatchBitmapData(bw, bh, bytes);
+    }
+
+    private static NavGridPatchBitmapData? TryFillNavGridPatchBufferFromChunkSource(
+        TerrainNavGridDefinition grid,
+        INavGridCellSource source,
+        int patchC0,
+        int patchC1,
+        int patchR0,
+        int patchR1,
+        int superSample,
+        bool hillshade,
+        IProgress<int>? progress,
+        CancellationToken cancellationToken)
+    {
+        var cols = grid.Columns;
+        var rows = grid.Rows;
+        var pc = patchC1 - patchC0 + 1;
+        var pr = patchR1 - patchR0 + 1;
+        if (pc < 1 || pr < 1)
+            return null;
+
+        var cLo = Math.Max(0, patchC0 - 1);
+        var cHi = Math.Min(cols - 1, patchC1 + 1);
+        var rLo = Math.Max(0, patchR0 - 1);
+        var rHi = Math.Min(rows - 1, patchR1 + 1);
+        var ew = cHi - cLo + 1;
+        var eh = rHi - rLo + 1;
+        var ext = new NavCellDefinition[ew * eh];
+        var loadTotal = (long)ew * eh;
+        long loadP = 0;
+        for (var j = 0; j < eh; j++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            for (var i = 0; i < ew; i++)
+            {
+                var gc = cLo + i;
+                var gr = rLo + j;
+                if (!source.TryGetCell(gc, gr, out var cell))
+                    cell = new NavCellDefinition { ElevationZ = 0, Walkable = true, Composition = SurfaceComposition.Soil };
+                ext[j * ew + i] = cell;
+                loadP++;
+                if ((loadP & 2047) == 0 && loadTotal > 0)
+                    progress?.Report((int)Math.Clamp(loadP * 50 / loadTotal, 0, 49));
+            }
+        }
+
+        var (zMin, zMax) = NavGridMapPreviewRaster.ElevRange(ext, ew, eh);
+        var zSpan = Math.Max(1e-3, zMax - zMin);
+        var bw = pc * superSample;
+        var bh = pr * superSample;
+        if (bw > 20000 || bh > 20000)
+            return null;
+
+        var stride = bw * 4;
+        var buffer = new byte[stride * bh];
+        var pixTotal = (long)bw * bh;
+        long pixP = 0;
+        for (var jr = 0; jr < bh; jr++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            for (var ic = 0; ic < bw; ic++)
+            {
+                var nc = patchC0 + ic / superSample;
+                var nr = patchR0 + jr / superSample;
+                nc = Math.Clamp(nc, patchC0, patchC1);
+                nr = Math.Clamp(nr, patchR0, patchR1);
+                var lc = nc - cLo;
+                var lr = nr - rLo;
+                var cell = ext[lr * ew + lc];
+                var (b, g, r8, a) = NavGridMapPreviewRaster.PixelBgra(cell, lc, lr, ew, eh, ext, zMin, zSpan,
+                    hillshade);
+                var o = jr * stride + ic * 4;
+                buffer[o] = b;
+                buffer[o + 1] = g;
+                buffer[o + 2] = r8;
+                buffer[o + 3] = a;
+                pixP++;
+                if ((pixP &  4095) == 0 && pixTotal > 0)
+                    progress?.Report((int)Math.Clamp(50 + pixP * 50 / pixTotal, 50, 99));
+            }
+        }
+
+        progress?.Report(100);
+        return new NavGridPatchBitmapData(bw, bh, buffer);
+    }
+
+    private static Image? TryBuildNavGridImageFromCellPatchInMemory(
         IReadOnlyList<NavCellDefinition> cells,
-        double zMin,
-        double zSpan,
-        bool hillshade)
+        int cols,
+        int rows,
+        int patchC0,
+        int patchC1,
+        int patchR0,
+        int patchR1,
+        double cellPixels,
+        int superSample,
+        bool hillshade,
+        double marginOx,
+        double marginOy)
     {
-        var water = cell.Composition == SurfaceComposition.Water
-                    || (!cell.Walkable && cell.FluidDepth > 0.01);
+        var filled = TryFillNavGridPatchBufferInMemory(cells, cols, rows, patchC0, patchC1, patchR0, patchR1, superSample,
+            hillshade, progress: null, CancellationToken.None);
+        if (filled is null)
+            return null;
+        var pc = patchC1 - patchC0 + 1;
+        var pr = patchR1 - patchR0 + 1;
+        return CreateNavGridPatchImage(filled.Value, cellPixels, marginOx, marginOy, patchC0, patchR0, pc, pr);
+    }
 
-        double R, G, B;
-        if (water)
-        {
-            B = 150;
-            G = 110;
-            R = 55;
-        }
-        else
-        {
-            BaseRgbFromComposition(cell.Composition, out R, out G, out B);
-            var zRel = (cell.ElevationZ - zMin) / zSpan;
-            var lum = 0.72 + 0.28 * (1 - zRel);
-            R *= lum;
-            G *= lum;
-            B *= lum;
+    private static Image? TryBuildNavGridPatchFromChunkSource(
+        TerrainNavGridDefinition grid,
+        INavGridCellSource source,
+        int patchC0,
+        int patchC1,
+        int patchR0,
+        int patchR1,
+        double cellPixels,
+        int superSample,
+        bool hillshade,
+        double marginOx,
+        double marginOy)
+    {
+        var filled = TryFillNavGridPatchBufferFromChunkSource(grid, source, patchC0, patchC1, patchR0, patchR1, superSample,
+            hillshade, progress: null, CancellationToken.None);
+        if (filled is null)
+            return null;
+        var pc = patchC1 - patchC0 + 1;
+        var pr = patchR1 - patchR0 + 1;
+        return CreateNavGridPatchImage(filled.Value, cellPixels, marginOx, marginOy, patchC0, patchR0, pc, pr);
+    }
 
-            if (!water && cell.Walkable)
+    private static bool TryDecodePngBgra(string path, out int w, out int h, out byte[] bgra)
+    {
+        w = 0;
+        h = 0;
+        bgra = null!;
+        try
+        {
+            using var stream = File.OpenRead(path);
+            var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
+            var frame = decoder.Frames[0];
+            BitmapSource src = frame;
+            if (!Equals(frame.Format, PixelFormats.Bgra32))
             {
-                CommunityTint(cell.VegetationCommunity, out var tr, out var tg, out var tb);
-                var d = cell.VegetationDensity01;
-                var mix = 0.5 * d;
-                R = R * (1 - mix) + tr * mix;
-                G = G * (1 - mix) + tg * mix;
-                B = B * (1 - mix) + tb * mix;
+                src = new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
+                src.Freeze();
+            }
 
-                if ((cell.VegetationStrata & VegetationStratum.Tree) != 0)
-                {
-                    R *= 0.9;
-                    G *= 0.92;
-                    B *= 0.94;
-                }
+            w = src.PixelWidth;
+            h = src.PixelHeight;
+            bgra = new byte[(long)w * h * 4];
+            src.CopyPixels(bgra, w * 4, 0);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
-                if ((cell.VegetationStrata & VegetationStratum.ForbWildflower) != 0)
-                {
-                    var bump = 0.22 * d;
-                    R = Math.Min(255, R + 28 * bump);
-                    G = Math.Min(255, G + 22 * bump);
-                }
+    /// <summary>Fast path: composite visible patch from pre-baked per-chunk PNGs (see <see cref="NavGridChunkPreviewGenerator"/>).</summary>
+    private static NavGridPatchBitmapData? TryComposePatchFromChunkPreviewPngs(
+        string chunkStoreDirectory,
+        NavGridChunkManifest manifest,
+        int patchC0,
+        int patchC1,
+        int patchR0,
+        int patchR1,
+        int superSample,
+        bool hillshade,
+        IProgress<int>? progress,
+        CancellationToken cancellationToken)
+    {
+        var tpn = manifest.ChunkPreviewPixelsPerNavCell;
+        if (tpn < 1)
+            return null;
+        if (manifest.ChunkPreviewHillshade is { } hs && hs != hillshade)
+            return null;
 
-                if ((cell.VegetationStrata & VegetationStratum.Shrub) != 0)
-                {
-                    G = Math.Min(255, G + 8 * d);
-                    B = Math.Min(255, B + 4 * d);
-                }
+        var sub = manifest.ChunkPreviewPngSubfolder;
+        if (string.IsNullOrWhiteSpace(sub))
+            sub = "preview_chunks";
+
+        var cols = manifest.Columns;
+        var rows = manifest.Rows;
+        var cw = manifest.ChunkWidthCells;
+        var ch = manifest.ChunkHeightCells;
+        if (cw < 1 || ch < 1 || cols < 1 || rows < 1)
+            return null;
+
+        var pc = patchC1 - patchC0 + 1;
+        var pr = patchR1 - patchR0 + 1;
+        superSample = Math.Clamp(superSample, 1, 8);
+        var bw = pc * superSample;
+        var bh = pr * superSample;
+        if (bw > 20000 || bh > 20000)
+            return null;
+
+        var stride = bw * 4;
+        var buffer = new byte[stride * bh];
+        var cache = new Dictionary<(int cx, int cy), (int tw, int th, byte[] pix)>();
+
+        bool TryGetChunkPng(int cx, int cy, out int tw, out int th, out byte[] pix)
+        {
+            if (cache.TryGetValue((cx, cy), out var e))
+            {
+                tw = e.tw;
+                th = e.th;
+                pix = e.pix;
+                return true;
+            }
+
+            var col0 = cx * cw;
+            var row0 = cy * ch;
+            var lw = Math.Min(cw, cols - col0);
+            var lh = Math.Min(ch, rows - row0);
+            if (lw < 1 || lh < 1)
+            {
+                tw = th = 0;
+                pix = null!;
+                return false;
+            }
+
+            tw = lw * tpn;
+            th = lh * tpn;
+            var path = Path.Combine(chunkStoreDirectory, sub, NavGridChunkIO.ChunkPreviewPngFileName(cx, cy));
+            if (!File.Exists(path) || !TryDecodePngBgra(path, out var iw, out var ih, out var bgra))
+            {
+                pix = null!;
+                return false;
+            }
+
+            if (iw != tw || ih != th)
+            {
+                pix = null!;
+                return false;
+            }
+
+            cache[(cx, cy)] = (tw, th, bgra);
+            pix = bgra;
+            return true;
+        }
+
+        var total = (long)bw * bh;
+        long done = 0;
+        for (var jr = 0; jr < bh; jr++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            for (var ic = 0; ic < bw; ic++)
+            {
+                var nc = patchC0 + ic / superSample;
+                var nr = patchR0 + jr / superSample;
+                nc = Math.Clamp(nc, 0, cols - 1);
+                nr = Math.Clamp(nr, 0, rows - 1);
+                var cx = nc / cw;
+                var cy = nr / ch;
+                if (!TryGetChunkPng(cx, cy, out var tw, out var th, out var pix))
+                    return null;
+
+                var col0 = cx * cw;
+                var row0 = cy * ch;
+                var lc = nc - col0;
+                var lr = nr - row0;
+                var sp = Math.Clamp(tpn / 2, 0, Math.Max(0, tpn - 1));
+                var sx = lc * tpn + sp;
+                var sy = lr * tpn + sp;
+                sx = Math.Clamp(sx, 0, tw - 1);
+                sy = Math.Clamp(sy, 0, th - 1);
+                var si = (sy * tw + sx) * 4;
+                var o = jr * stride + ic * 4;
+                buffer[o] = pix[si];
+                buffer[o + 1] = pix[si + 1];
+                buffer[o + 2] = pix[si + 2];
+                buffer[o + 3] = pix[si + 3];
+
+                done++;
+                if ((done & 4095) == 0 && total > 0)
+                    progress?.Report((int)Math.Clamp(done * 100 / total, 0, 99));
             }
         }
 
-        if (hillshade && cols > 2 && rows > 2)
-        {
-            var zC = SampleDisplayZ(cell);
-            var zW = c > 0 ? SampleDisplayZ(cells[r * cols + (c - 1)]) : zC;
-            var zE = c < cols - 1 ? SampleDisplayZ(cells[r * cols + (c + 1)]) : zC;
-            var zN = r > 0 ? SampleDisplayZ(cells[(r - 1) * cols + c]) : zC;
-            var zS = r < rows - 1 ? SampleDisplayZ(cells[(r + 1) * cols + c]) : zC;
-            var dx = zE - zW;
-            var dy = zN - zS;
-            var nx = -dx;
-            var ny = -dy;
-            var nz = zSpan * 0.9;
-            var len = Math.Sqrt(nx * nx + ny * ny + nz * nz);
-            if (len > 1e-6)
-            {
-                nx /= len;
-                ny /= len;
-                nz /= len;
-                var lx = 0.55;
-                var ly = -0.35;
-                var lz = 0.76;
-                var shade = nx * lx + ny * ly + nz * lz;
-                shade = Math.Clamp(0.42 + 0.78 * shade, 0.38, 1.18);
-                R *= shade;
-                G *= shade;
-                B *= shade;
-            }
-        }
-
-        return (
-            (byte)Math.Clamp(B, 0, 255),
-            (byte)Math.Clamp(G, 0, 255),
-            (byte)Math.Clamp(R, 0, 255),
-            (byte)255);
-    }
-
-    private static double SampleDisplayZ(NavCellDefinition c)
-    {
-        if (c.Composition == SurfaceComposition.Water || (!c.Walkable && c.FluidDepth > 0.01))
-            return c.WaterSurfaceZ > 0 ? c.WaterSurfaceZ : c.BedElevationZ;
-        return c.ElevationZ;
-    }
-
-    private static void BaseRgbFromComposition(SurfaceComposition comp, out double R, out double G, out double B)
-    {
-        switch (comp)
-        {
-            case SurfaceComposition.Rock:
-                R = 98;
-                G = 102;
-                B = 108;
-                break;
-            case SurfaceComposition.Sand:
-                R = 210;
-                G = 195;
-                B = 155;
-                break;
-            case SurfaceComposition.Mud:
-                R = 95;
-                G = 85;
-                B = 72;
-                break;
-            case SurfaceComposition.Grass:
-                R = 88;
-                G = 135;
-                B = 78;
-                break;
-            case SurfaceComposition.ForestFloor:
-                R = 68;
-                G = 118;
-                B = 72;
-                break;
-            case SurfaceComposition.Ice:
-                R = 230;
-                G = 245;
-                B = 252;
-                break;
-            case SurfaceComposition.Pavement:
-                R = 120;
-                G = 118;
-                B = 115;
-                break;
-            default:
-                R = 92;
-                G = 128;
-                B = 84;
-                break;
-        }
-    }
-
-    private static void CommunityTint(VegetationCommunityKind k, out double R, out double G, out double B)
-    {
-        switch (k)
-        {
-            case VegetationCommunityKind.AlpineSparse:
-                R = 115;
-                G = 145;
-                B = 105;
-                break;
-            case VegetationCommunityKind.PlainsHerbaceous:
-                R = 72;
-                G = 168;
-                B = 88;
-                break;
-            case VegetationCommunityKind.RiparianWoodland:
-                R = 48;
-                G = 132;
-                B = 72;
-                break;
-            case VegetationCommunityKind.LowlandForest:
-                R = 42;
-                G = 108;
-                B = 58;
-                break;
-            case VegetationCommunityKind.CoastalSandSparse:
-                R = 135;
-                G = 175;
-                B = 115;
-                break;
-            case VegetationCommunityKind.TransitionMixed:
-                R = 78;
-                G = 142;
-                B = 82;
-                break;
-            default:
-                R = 88;
-                G = 128;
-                B = 86;
-                break;
-        }
+        progress?.Report(100);
+        return new NavGridPatchBitmapData(bw, bh, buffer);
     }
 }

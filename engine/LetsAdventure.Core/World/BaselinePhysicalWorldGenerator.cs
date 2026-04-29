@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Threading;
 using System.Threading.Tasks;
 using LetsAdventure.Core.Simulation;
 
@@ -28,6 +30,20 @@ public sealed class BaselineGenerationRequest
     /// </summary>
     public double LandFreshwaterStrictness { get; init; } = 1.0;
 
+    /// <summary>
+    /// Horizontal spacing of nav / hydrology samples in meters (same as <see cref="TerrainNavGridDefinition.CellSize"/>).
+    /// Each grid cell is one traversability/walkability sample; character movement uses these cells via <see cref="TerrainNavGrid"/>.
+    /// When null, baseline uses <see cref="BaselinePhysicalWorldGenerator.BaselineGridDimension"/> steps on the longer XY edge
+    /// (large worlds stay coarse: e.g. 2M m span → ~488 m cells, not 1 m).
+    /// </summary>
+    public double? NavSampleSpacingMeters { get; init; }
+
+    /// <summary>
+    /// When <see cref="NavSampleSpacingMeters"/> is set, validation fails if <c>columns × rows</c> would exceed this
+    /// (guards against accidental 1 m sampling over a multi‑million‑meter map). Raise for high-memory batch runs.
+    /// </summary>
+    public long MaxNavCells { get; init; } = 268_435_456;
+
     /// <summary>Default authoring bounds: 0…2M XY, Z −10k…10k (editor map tab). See <see cref="BaselinePhysicalWorldGenerator.ClassicBaselineExtentXy"/> for the historic huge extent.</summary>
     public static BaselineGenerationRequest Default { get; } = new()
     {
@@ -50,6 +66,17 @@ public sealed class BaselineGenerationRequest
             throw new ArgumentException("Water surface offset must be a finite number.");
         if (!double.IsFinite(LandFreshwaterStrictness) || LandFreshwaterStrictness is < 0.12 or > 40)
             throw new ArgumentException("Land freshwater strictness must be between 0.12 and 40.");
+        if (NavSampleSpacingMeters is { } ns)
+        {
+            if (!double.IsFinite(ns) || ns <= 0)
+                throw new ArgumentException("NavSampleSpacingMeters must be a positive finite value when set.");
+            var (_, c, r) = BaselinePhysicalWorldGenerator.GetNavSamplingGridShape(this);
+            var n = (long)c * r;
+            if (n > MaxNavCells)
+                throw new ArgumentException(
+                    $"At NavSampleSpacingMeters={ns}, the nav grid would be {c}×{r} ({n:N0} cells), above MaxNavCells={MaxNavCells:N0}. " +
+                    "Use a larger spacing, smaller XY bounds, or raise MaxNavCells. Continental-scale 1 m sampling needs a streaming pipeline (not this in-memory synthesizer).");
+        }
     }
 }
 
@@ -90,10 +117,29 @@ public static class BaselinePhysicalWorldGenerator
     /// </summary>
     public const int BaselineGridDimension = 4096;
 
-    public static PhysicalWorldGenerationResult Generate(int? seed = null, IProgress<string>? progress = null) =>
-        Generate(new BaselineGenerationRequest { Seed = seed, MinX = BaselineGenerationRequest.Default.MinX, MinY = BaselineGenerationRequest.Default.MinY, MinZ = BaselineGenerationRequest.Default.MinZ, MaxX = BaselineGenerationRequest.Default.MaxX, MaxY = BaselineGenerationRequest.Default.MaxY, MaxZ = BaselineGenerationRequest.Default.MaxZ }, progress);
+    /// <summary>
+    /// Cell size and column/row counts the procedural pipeline will use (matches <see cref="ProceduralPhysicalWorldGenerator"/> floor rules).
+    /// </summary>
+    public static (double CellSizeMeters, int Columns, int Rows) GetNavSamplingGridShape(BaselineGenerationRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var extentX = request.MaxX - request.MinX;
+        var extentY = request.MaxY - request.MinY;
+        var span = Math.Max(extentX, extentY);
+        double cell = request.NavSampleSpacingMeters is { } ns
+            ? Math.Max(0.5, ns)
+            : Math.Max(0.5, span / BaselineGridDimension);
+        var cols = Math.Max(4, (int)Math.Floor(extentX / cell));
+        var rows = Math.Max(4, (int)Math.Floor(extentY / cell));
+        return (cell, cols, rows);
+    }
 
-    public static PhysicalWorldGenerationResult Generate(BaselineGenerationRequest request, IProgress<string>? progress = null)
+    public static PhysicalWorldGenerationResult Generate(int? seed = null, IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        Generate(new BaselineGenerationRequest { Seed = seed, MinX = BaselineGenerationRequest.Default.MinX, MinY = BaselineGenerationRequest.Default.MinY, MinZ = BaselineGenerationRequest.Default.MinZ, MaxX = BaselineGenerationRequest.Default.MaxX, MaxY = BaselineGenerationRequest.Default.MaxY, MaxZ = BaselineGenerationRequest.Default.MaxZ }, progress, cancellationToken);
+
+    public static PhysicalWorldGenerationResult Generate(BaselineGenerationRequest request, IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         request.Validate();
@@ -111,10 +157,11 @@ public static class BaselinePhysicalWorldGenerator
         var maxY = request.MaxY;
         var maxZ = request.MaxZ;
 
-        var extentX = maxX - minX;
-        var extentY = maxY - minY;
-        var span = Math.Max(extentX, extentY);
-        var cell = span / BaselineGridDimension;
+        var span = Math.Max(maxX - minX, maxY - minY);
+        var (cell, colsNav, rowsNav) = GetNavSamplingGridShape(request);
+        progress?.Report(string.Format(CultureInfo.InvariantCulture,
+            "Nav sampling grid: {0}×{1} cells, cell size {2:F3} m (each cell is one authored nav/hydrology sample; empty Nav sample field = {3} steps on long axis).",
+            colsNav, rowsNav, cell, BaselineGridDimension));
 
         var proc = new ProceduralWorldSpec
         {
@@ -161,7 +208,8 @@ public static class BaselinePhysicalWorldGenerator
 
         progress?.Report(
             "Running procedural synthesis (continental terrain, perimeter ocean, lakes, rivers to sea, nav grid). This may take a little while…");
-        var result = ProceduralPhysicalWorldGenerator.Generate(proc, progress);
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = ProceduralPhysicalWorldGenerator.Generate(proc, progress, cancellationToken);
         var world = result.World;
         var report = result.Report;
         progress?.Report("Procedural synthesis complete.");
@@ -176,8 +224,11 @@ public static class BaselinePhysicalWorldGenerator
             var waterZ = request.WaterSurfaceOffsetM;
 
             var wetZs = new List<double>();
+            var cancelStride = 0;
             foreach (var c in cells)
             {
+                if (((cancelStride++) & 65535) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
                 if (!c.Walkable && c.FluidDepth > 0.01)
                     wetZs.Add(c.WaterSurfaceZ);
             }
@@ -205,8 +256,11 @@ public static class BaselinePhysicalWorldGenerator
 
             double Map(double procZ) => Math.Clamp(seaWorld + (procZ - zSeaProc), minZ, zHiClamp);
 
+            cancelStride = 0;
             foreach (var c in cells)
             {
+                if (((cancelStride++) & 65535) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
                 var wet = !c.Walkable && c.FluidDepth > 0.01;
                 if (wet)
                 {
@@ -238,6 +292,7 @@ public static class BaselinePhysicalWorldGenerator
         world.RegionBoundaries.Clear();
         progress?.Report(
             $"Building Voronoi lore regions ({regionCount} seeds; water, ridge corridors, dense forest are barriers) — this step scans the full nav grid…");
+        cancellationToken.ThrowIfCancellationRequested();
         BuildVoronoiRegionsFromTerrain(world, regionCount, rng, minZ, maxZ);
         progress?.Report($"Lore regions: {world.RegionBoundaries.Count}.");
 
@@ -267,6 +322,7 @@ public static class BaselinePhysicalWorldGenerator
         }
 
         progress?.Report("Adding baseline features (paths, vegetation, ridge overlays, plateaus)…");
+        cancellationToken.ThrowIfCancellationRequested();
         AddBaselineFeatures(world, rng, progress, minZ, maxZ);
 
         world.GlobalBounds.Min = new Vec3 { X = minX, Y = minY, Z = minZ };

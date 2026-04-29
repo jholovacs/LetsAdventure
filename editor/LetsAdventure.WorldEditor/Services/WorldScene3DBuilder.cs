@@ -32,6 +32,12 @@ public sealed class WorldScene3DOptions
 
     /// <summary>Hard cap on detail patch width/height in cells (after chunk alignment).</summary>
     public int TerrainDetailMaxCellsPerAxis { get; set; } = 288;
+
+    /// <summary>
+    /// When &gt; 0, terrain and Helix overlays are limited to a square of this half-extent (meters in world X/Y)
+    /// around <see cref="TerrainDetailAnchorWorld"/> (or nav center). 0 = no clip (full world; can be very slow).
+    /// </summary>
+    public double TerrainClipHalfExtentM { get; set; } = 1000;
 }
 
 /// <summary>Builds a WPF 3D model: world X,Y horizontal and Z up map to WPF (X, Z, -Y) so Y is up in the viewport.</summary>

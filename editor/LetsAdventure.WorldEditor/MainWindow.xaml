@@ -25,6 +25,8 @@
       </MenuItem>
         <MenuItem Header="_View">
         <MenuItem Header="_Refresh map preview" Click="RefreshPreview_Click" />
+        <MenuItem Header="_Generate chunk map tiles (PNG)…" Click="GenerateChunkMapTiles_Click"
+                  ToolTip="Build low-res PNG tiles per nav chunk for faster 2D preview (after baseline or any time)." />
         <MenuItem Header="Refresh _3D scene" Click="World3D_RefreshMenu_Click" />
       </MenuItem>
     </Menu>
@@ -36,13 +38,22 @@
       <StatusBarItem>
         <TextBlock x:Name="StatusDirty" />
       </StatusBarItem>
+      <Separator />
+      <StatusBarItem>
+        <StackPanel Orientation="Horizontal">
+          <TextBlock x:Name="StatusMap2d" Text="" Foreground="{DynamicResource Theme.Text.Muted}" MaxWidth="380"
+                     TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+          <ProgressBar x:Name="PrgMap2d" Width="140" Height="14" Margin="10,0,0,0" Minimum="0" Maximum="100"
+                       Value="0" Visibility="Collapsed" VerticalAlignment="Center" />
+        </StackPanel>
+      </StatusBarItem>
     </StatusBar>
     <TabControl x:Name="MainTabs" Margin="8" SelectionChanged="MainTabs_SelectionChanged">
       <TabItem Header="Map">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel Margin="12" MaxWidth="720">
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Muted}" Margin="0,0,0,10"
-                       Text="World size in meters (SI). Baseline maps procedural ocean to your Z midpoint, applies water offset for sea/lake/river level vs land, and land freshwater % to scale river tributary density on terrain. Generate baseline builds continental terrain, hydrology, ocean, and nav grid for this volume." />
+                       Text="World size in meters (SI). Baseline maps procedural ocean to your Z midpoint, applies water offset for sea/lake/river level vs land, and land freshwater % to scale river tributary density. The nav grid is a real traversability mesh: each cell is one walkability sample, with spacing in meters (see Nav XY sample). Generate baseline builds terrain, hydrology, and that grid for this volume." />
             <Label Content="Coordinate description" />
             <TextBox x:Name="TxtCoordDesc" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="48" />
             <TextBlock Text="World bounds (min / max, meters)" FontWeight="SemiBold" Margin="0,14,0,6" />
@@ -55,6 +66,7 @@
                 <ColumnDefinition Width="120" />
               </Grid.ColumnDefinitions>
               <Grid.RowDefinitions>
+                <RowDefinition />
                 <RowDefinition />
                 <RowDefinition />
                 <RowDefinition />
@@ -85,12 +97,21 @@
               <TextBlock Grid.Row="4" Grid.Column="3" Grid.ColumnSpan="2" VerticalAlignment="Center" Margin="8,4,0,4"
                          TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Muted}"
                          Text="100 = default; 50 ≈ half as much river network; 150 = more." />
+              <TextBlock Grid.Row="5" Grid.Column="0" VerticalAlignment="Center" Text="Nav XY sample (m)" Margin="0,4"
+                         ToolTip="Spacing of each nav/hydrology cell in meters (1 ≈ one square meter per cell). Leave empty for baseline default: 4096 steps on the longer map edge (large worlds stay coarse)." />
+              <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtNavSampleSpacing" Margin="0,4" />
+              <TextBlock Grid.Row="5" Grid.Column="3" Grid.ColumnSpan="2" VerticalAlignment="Center" Margin="8,4,0,4"
+                         TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Muted}"
+                         Text="Empty = fast continental default (~488 m cells for a 2M m map). 1 = human scale; needs small bounds or massive RAM." />
             </Grid>
             <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
               <Button Content="Generate baseline map" Padding="10,6" Click="MetadataGenerateBaseline_Click"
-                      ToolTip="Uses the bounds above. Large maps use a 4096² nav sample and chunk the nav store." />
+                      ToolTip="Uses the bounds above. Optional Nav XY sample sets cell size in meters (empty = 4096 samples on long axis). Output folder: physical_world.json + nav chunks." />
               <Button Content="Load map…" Padding="10,6" Margin="10,0,0,0" Click="LoadMap_Click"
-                      ToolTip="Open physical_world.json (and optional .navgrid folder)." />
+                      ToolTip="Choose the folder that contains physical_world.json (and typically a .navgrid folder)." />
+              <Button x:Name="BtnRender2dMap" Content="Render 2D map" Padding="10,6" Margin="10,0,0,0"
+                      IsEnabled="False" Click="Render2dMap_Click"
+                      ToolTip="Builds map2d PNG tiles next to the nav chunk store (1000 px per km at finest level; coarser levels average 2×2 from the level below). Requires manifest.json in the .navgrid folder." />
             </StackPanel>
             <Button Content="Apply bounds &amp; description (no regen)" Margin="0,10,0,0" HorizontalAlignment="Left"
                     Padding="10,4" Click="ApplyMetadata_Click" />
@@ -98,10 +119,10 @@
                        Text="Chunked nav grids: load all cells into RAM for editing, or release back to streaming." />
             <StackPanel Orientation="Horizontal">
               <Button Content="Load entire grid from chunk store" Padding="8,4" Click="NavGridLoadAllFromChunks_Click"
-                      ToolTip="Read all .bin chunks + manifest into RAM." />
+                      ToolTip="If the world has no saved .navgrid path yet, you can browse to a folder that contains manifest.json." />
               <Button Content="Release cells to chunk store" Margin="10,0,0,0" Padding="8,4"
                       Click="NavGridReleaseCellsToChunkStore_Click"
-                      ToolTip="Flush full grid to disk if needed, then stream again." />
+                      ToolTip="Flush full grid to disk if needed, then stream again. You can pick the .navgrid folder if this document has no path yet." />
             </StackPanel>
           </StackPanel>
         </ScrollViewer>
@@ -200,7 +221,7 @@
         <DockPanel Margin="8">
           <StackPanel DockPanel.Dock="Top">
             <TextBlock Margin="0,0,0,6" Foreground="{DynamicResource Theme.Text.Muted}" TextWrapping="Wrap"
-                       Text="Wheel: zoom. Ctrl+wheel: raster detail. WASD: pan N/W/S/E. Hold LMB and drag to grab-pan. Toggle overlays below." />
+                       Text="Wheel: zoom (refines raster under the cursor). Ctrl+wheel: larger cells on canvas. WASD: pan N/W/S/E. Hold LMB and drag to grab-pan. Toggle overlays below." />
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
               <Label Content="Vector scale (px / world unit):" VerticalAlignment="Center" />
               <Slider x:Name="SldPreviewScale" Width="200" Minimum="0.25" Maximum="6" Value="2" TickFrequency="0.25"
@@ -210,15 +231,15 @@
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
               <CheckBox x:Name="ChkPreviewRaster" Content="Nav cell raster (terrain + vegetation)" IsChecked="True"
                         Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
-              <CheckBox x:Name="ChkPreviewHillshade" Content="Hillshade" IsChecked="True" Margin="16,0,0,0"
+              <CheckBox x:Name="ChkPreviewHillshade" Content="Hillshade" IsChecked="False" Margin="16,0,0,0"
                         Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
               <Button Content="Fit entire map" Margin="16,0,0,0" Padding="8,2" VerticalAlignment="Center"
                       Click="MapPreviewFit_Click" ToolTip="Zoom so the full map fits in the window." />
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-              <CheckBox x:Name="ChkPreviewLoreRegions" Content="Lore region borders" IsChecked="True"
+              <CheckBox x:Name="ChkPreviewLoreRegions" Content="Lore region borders" IsChecked="False"
                         Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
-              <CheckBox x:Name="ChkPreviewTerritoryBorders" Content="Territory (faction) borders" IsChecked="True" Margin="16,0,0,0"
+              <CheckBox x:Name="ChkPreviewTerritoryBorders" Content="Territory (faction) borders" IsChecked="False" Margin="16,0,0,0"
                         Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
               <CheckBox x:Name="ChkPreviewFeatures" Content="Features (paths, water, plateaus)" IsChecked="True" Margin="16,0,0,0"
                         Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed" VerticalAlignment="Center" />
@@ -229,22 +250,55 @@
                       IsSnapToTickEnabled="True" ValueChanged="SldRasterCellPx_ValueChanged" />
               <TextBlock VerticalAlignment="Center" Margin="8,0,0,0" Text="{Binding ElementName=SldRasterCellPx, Path=Value}" />
             </StackPanel>
+            <CheckBox x:Name="ChkPyramidViewer" Margin="0,0,0,8"
+                      Content="Pre-rendered 2D pyramid (wheel: zoom toward cursor; step 1 = full overview)"
+                      Checked="ChkPyramidViewer_Changed" Unchecked="ChkPyramidViewer_Changed" />
+            <TextBlock x:Name="TxtMapPreviewRasterBusy" Margin="0,0,0,4" Visibility="Collapsed" TextWrapping="Wrap"
+                       Foreground="{DynamicResource Theme.Text.Muted}" />
+            <ProgressBar x:Name="PrgMapPreviewRaster" Height="8" Margin="0,0,0,8" Visibility="Collapsed"
+                         Minimum="0" Maximum="100" Value="0" />
           </StackPanel>
           <Border BorderThickness="1"
                   BorderBrush="{DynamicResource Theme.Border}"
                   Background="{DynamicResource Theme.Panel.Background}">
-            <ScrollViewer x:Name="MapPreviewScrollViewer"
-                          HorizontalScrollBarVisibility="Auto"
-                          VerticalScrollBarVisibility="Auto"
-                          Focusable="True"
-                          Cursor="Hand"
-                          PreviewMouseWheel="MapPreviewScrollViewer_OnPreviewMouseWheel"
-                          PreviewMouseLeftButtonDown="MapPreviewScrollViewer_OnPreviewMouseLeftButtonDown"
-                          MouseMove="MapPreviewScrollViewer_OnMouseMove"
-                          PreviewMouseLeftButtonUp="MapPreviewScrollViewer_OnPreviewMouseLeftButtonUp"
-                          LostMouseCapture="MapPreviewScrollViewer_OnLostMouseCapture">
-              <Canvas x:Name="PreviewCanvas" Width="2000" Height="2000" />
-            </ScrollViewer>
+            <Grid>
+              <ScrollViewer x:Name="MapPreviewScrollViewer"
+                            HorizontalScrollBarVisibility="Auto"
+                            VerticalScrollBarVisibility="Auto"
+                            Focusable="True"
+                            Cursor="Hand"
+                            PreviewMouseWheel="MapPreviewScrollViewer_OnPreviewMouseWheel"
+                            ScrollChanged="MapPreviewScrollViewer_OnScrollChanged"
+                            PreviewMouseLeftButtonDown="MapPreviewScrollViewer_OnPreviewMouseLeftButtonDown"
+                            MouseMove="MapPreviewScrollViewer_OnMouseMove"
+                            PreviewMouseLeftButtonUp="MapPreviewScrollViewer_OnPreviewMouseLeftButtonUp"
+                            LostMouseCapture="MapPreviewScrollViewer_OnLostMouseCapture">
+                <Canvas x:Name="PreviewCanvas" Width="2000" Height="2000" />
+              </ScrollViewer>
+              <Grid x:Name="Map2dPyramidHost" Visibility="Collapsed" Focusable="True"
+                    Background="{DynamicResource Theme.Panel.Background}"
+                    PreviewMouseWheel="Map2dPyramidHost_OnPreviewMouseWheel">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="*" />
+                  <RowDefinition Height="*" />
+                  <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Image x:Name="Map2dP00" Grid.Row="0" Grid.Column="0" Stretch="Uniform" />
+                <Image x:Name="Map2dP01" Grid.Row="0" Grid.Column="1" Stretch="Uniform" />
+                <Image x:Name="Map2dP02" Grid.Row="0" Grid.Column="2" Stretch="Uniform" />
+                <Image x:Name="Map2dP10" Grid.Row="1" Grid.Column="0" Stretch="Uniform" />
+                <Image x:Name="Map2dP11" Grid.Row="1" Grid.Column="1" Stretch="Uniform" />
+                <Image x:Name="Map2dP12" Grid.Row="1" Grid.Column="2" Stretch="Uniform" />
+                <Image x:Name="Map2dP20" Grid.Row="2" Grid.Column="0" Stretch="Uniform" />
+                <Image x:Name="Map2dP21" Grid.Row="2" Grid.Column="1" Stretch="Uniform" />
+                <Image x:Name="Map2dP22" Grid.Row="2" Grid.Column="2" Stretch="Uniform" />
+              </Grid>
+            </Grid>
           </Border>
         </DockPanel>
       </TabItem>
