@@ -26,9 +26,10 @@ public partial class MainWindow : Window
 
     private bool _scene3DStale = true;
     private Vec3 _3dFocusWorld;
-    private Point _3dLastMouse;
-    private MouseButton? _viewportDragButton;
     private bool _3dFocusInitialized;
+    private double _3dStreamRebuildAnchorX;
+    private double _3dStreamRebuildAnchorY;
+    private bool _3dStreamRebuildAnchorValid;
     private readonly HelixToolkit.Wpf.SharpDX.DefaultEffectsManager _helixEffects = new();
     private readonly HashSet<Key> _3dKeysDown = [];
     private readonly HashSet<Key> _mapPreviewKeysDown = [];
@@ -102,6 +103,7 @@ public partial class MainWindow : Window
         DrawPreview();
         _scene3DStale = true;
         _3dFocusInitialized = false;
+        _3dStreamRebuildAnchorValid = false;
         if (Equals(MainTabs.SelectedItem, Scene3DTab))
             RebuildWorld3DScene();
     }
@@ -139,7 +141,7 @@ public partial class MainWindow : Window
         if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
             return;
 
-        _navChunkSource = NavGridChunkCellSource.TryOpen(dir);
+        _navChunkSource = NavGridChunkCellSource.TryOpen(dir, maxCachedChunks: 512);
         if (_navChunkSource is null)
             return;
         _navChunkStoreDirectoryAbsolute = dir;
@@ -175,16 +177,21 @@ public partial class MainWindow : Window
         return null;
     }
 
+    private const double ViewerStreamHalfExtentM = 2000;
+    private const double CameraHeightAboveGroundM = 2;
+    private const double WasdMoveSpeedMetersPerSecond = 12;
+    private const double TerrainStreamRebuildStepM = 200;
+
     private void PreloadNavGridChunksFor3DView()
     {
         if (_world.NavGridCellSource is not NavGridChunkCellSource src)
             return;
-        var chunkHalf = Sld3DChunkDetailHalf is not null
-            ? (int)Math.Clamp(Math.Round(Sld3DChunkDetailHalf.Value), 0, 512)
-            : 72;
+        var cs = Math.Max(1e-9, src.Manifest.CellSize);
         var cw = Math.Max(1, src.Manifest.ChunkWidthCells);
-        var radius = Math.Clamp(chunkHalf / cw + 3, 2, 18);
+        var chunkWm = cw * cs;
+        var radius = Math.Max(1, (int)Math.Ceiling(ViewerStreamHalfExtentM / chunkWm) + 1);
         src.PreloadChunksAroundWorldXY(_3dFocusWorld.X, _3dFocusWorld.Y, radius);
+        src.RetainChunksIntersectingWorldSquare(_3dFocusWorld.X, _3dFocusWorld.Y, ViewerStreamHalfExtentM);
     }
 
     private static void CopyDirectoryRecursive(string sourceDir, string targetDir)
@@ -416,7 +423,7 @@ public partial class MainWindow : Window
                 ? "Hydrology / slope checks passed."
                 : "Review hydrology / slope warnings above.");
             logWindow.AppendLine(
-                "Closing this window opens the 3D scene tab. Baseline output is under baseline-output above; use Save As to copy elsewhere. WASD pans; LMB orbits; mouse wheel zooms; Shift+wheel changes orbit elevation.");
+                "Closing this window opens the 3D scene tab. Baseline output is under baseline-output above; use Save As to copy elsewhere. On the 3D tab: WASD walks on the ground (north = +Y); the view streams nav chunks in a 4 km window around you; mouse wheel adjusts field of view.");
             baselineSucceeded = true;
             logWindow.NotifyComplete();
         }
@@ -478,7 +485,7 @@ public partial class MainWindow : Window
                 grid.NavGridChunkSessionDirectoryAbsolute = null;
                 grid.Cells = null;
                 _navChunkSource?.Dispose();
-                _navChunkSource = NavGridChunkCellSource.TryOpen(sidecar);
+                _navChunkSource = NavGridChunkCellSource.TryOpen(sidecar, maxCachedChunks: 512);
                 _navChunkStoreDirectoryAbsolute = sidecar;
                 _world.NavGridCellSource = _navChunkSource;
             }
@@ -490,7 +497,7 @@ public partial class MainWindow : Window
                 grid.NavGridChunkStoreRelativePath = System.IO.Path.GetFileName(sidecar);
                 grid.NavGridChunkSessionDirectoryAbsolute = null;
                 _navChunkSource?.Dispose();
-                _navChunkSource = NavGridChunkCellSource.TryOpen(sidecar);
+                _navChunkSource = NavGridChunkCellSource.TryOpen(sidecar, maxCachedChunks: 512);
                 _navChunkStoreDirectoryAbsolute = sidecar;
                 _world.NavGridCellSource = _navChunkSource;
             }
@@ -625,60 +632,61 @@ public partial class MainWindow : Window
         if (_3dKeysDown.Count == 0)
             return;
 
-        var ld = World3DCamera.LookDirection;
-        var forward = new Vector3D(ld.X, 0, ld.Z);
-        if (forward.LengthSquared < 1e-12)
-            forward = new Vector3D(0, 0, -1);
-        else
-            forward.Normalize();
-
-        var right = Vector3D.CrossProduct(forward, new Vector3D(0, 1, 0));
-        if (right.LengthSquared < 1e-12)
-            right = new Vector3D(1, 0, 0);
-        else
-            right.Normalize();
-
-        var speed = Math.Max(2.5, Sld3DDistance.Value * 0.0045);
-        var delta = new Vector3D(0, 0, 0);
+        // World +Y is north; +X is east. Camera looks toward north in view space (fixed heading).
+        var step = WasdMoveSpeedMetersPerSecond * _3dMoveTimer.Interval.TotalSeconds;
+        double wx = 0, wy = 0;
         if (_3dKeysDown.Contains(Key.W))
-            delta += forward * speed;
+            wy += step;
         if (_3dKeysDown.Contains(Key.S))
-            delta -= forward * speed;
+            wy -= step;
         if (_3dKeysDown.Contains(Key.D))
-            delta += right * speed;
+            wx += step;
         if (_3dKeysDown.Contains(Key.A))
-            delta -= right * speed;
+            wx -= step;
 
-        if (delta.LengthSquared < 1e-12)
+        if (wx == 0 && wy == 0)
             return;
 
-        Pan3DFocusInViewSpace(delta);
-        PreloadNavGridChunksFor3DView();
-        Apply3DCameraOnly();
-        WorldViewportDx.InvalidateRender();
-    }
-
-    /// <summary>Moves orbit focus in view plane (WPF XZ horizontal, Y up) and re-samples Z from terrain.</summary>
-    private void Pan3DFocusInViewSpace(Vector3D deltaView)
-    {
-        double nx, ny;
-        if (WorldSceneHelixBuilder.TryGetViewMapping(_world, out _, out var xyScale, out _))
-        {
-            nx = _3dFocusWorld.X + deltaView.X / xyScale;
-            ny = _3dFocusWorld.Y - deltaView.Z / xyScale;
-        }
-        else
-        {
-            nx = _3dFocusWorld.X + deltaView.X;
-            ny = _3dFocusWorld.Y - deltaView.Z;
-        }
-
-        var gz = WorldScene3DBuilder.SampleSurfaceElevation(_world, nx, ny) + FocusClearanceAboveGround();
-        _3dFocusWorld = new Vec3 { X = nx, Y = ny, Z = gz };
+        var nx = _3dFocusWorld.X + wx;
+        var ny = _3dFocusWorld.Y + wy;
+        var ground = WorldScene3DBuilder.SampleSurfaceElevation(_world, nx, ny);
+        _3dFocusWorld = new Vec3 { X = nx, Y = ny, Z = ground + CameraHeightAboveGroundM };
         _3dFocusInitialized = true;
         Txt3DWorldX.Text = _3dFocusWorld.X.ToString("F1");
         Txt3DWorldY.Text = _3dFocusWorld.Y.ToString("F1");
         Txt3DWorldZ.Text = _3dFocusWorld.Z.ToString("F1");
+
+        PreloadNavGridChunksFor3DView();
+        if (MaybeRebuild3DTerrainAfterMove())
+            return;
+        Apply3DCameraOnly();
+        WorldViewportDx.InvalidateRender();
+    }
+
+    /// <summary>Re-centers the high-res terrain patch after the camera has walked far enough (chunked worlds).</summary>
+    private bool MaybeRebuild3DTerrainAfterMove()
+    {
+        if (!Equals(MainTabs.SelectedItem, Scene3DTab))
+            return false;
+        if (_world.NavGridCellSource is not NavGridChunkCellSource)
+            return false;
+        if (Chk3DTerrain.IsChecked != true)
+            return false;
+        if (!_3dStreamRebuildAnchorValid)
+            return false;
+        var dx = _3dFocusWorld.X - _3dStreamRebuildAnchorX;
+        var dy = _3dFocusWorld.Y - _3dStreamRebuildAnchorY;
+        if (dx * dx + dy * dy < TerrainStreamRebuildStepM * TerrainStreamRebuildStepM)
+            return false;
+        RebuildWorld3DScene();
+        return true;
+    }
+
+    private void Capture3DTerrainStreamAnchor()
+    {
+        _3dStreamRebuildAnchorX = _3dFocusWorld.X;
+        _3dStreamRebuildAnchorY = _3dFocusWorld.Y;
+        _3dStreamRebuildAnchorValid = true;
     }
 
     private void RegionAdd_Click(object sender, RoutedEventArgs e)
@@ -1475,11 +1483,6 @@ public partial class MainWindow : Window
         return line;
     }
 
-    /// <summary>Height of the 3D orbit focus point above sampled ground at that XY (world units).</summary>
-    private const double FocusHeightAboveGround = 100;
-
-    private static double FocusClearanceAboveGround() => FocusHeightAboveGround;
-
     private void Ensure3DFocusInitialized()
     {
         if (_3dFocusInitialized)
@@ -1498,8 +1501,7 @@ public partial class MainWindow : Window
         }
 
         var ground = WorldScene3DBuilder.SampleSurfaceElevation(_world, cx, cy);
-        var clearance = FocusClearanceAboveGround();
-        _3dFocusWorld = new Vec3 { X = cx, Y = cy, Z = ground + clearance };
+        _3dFocusWorld = new Vec3 { X = cx, Y = cy, Z = ground + CameraHeightAboveGroundM };
         Txt3DWorldX.Text = cx.ToString("F1");
         Txt3DWorldY.Text = cy.ToString("F1");
         Txt3DWorldZ.Text = _3dFocusWorld.Z.ToString("F1");
@@ -1536,6 +1538,7 @@ public partial class MainWindow : Window
         }
 
         _scene3DStale = false;
+        Capture3DTerrainStreamAnchor();
         Apply3DCameraOnly();
         WorldViewportDx.InvalidateRender();
     }
@@ -1544,26 +1547,21 @@ public partial class MainWindow : Window
     {
         if (World3DCamera is null)
             return;
-        Point3D focus;
+        var ground = WorldScene3DBuilder.SampleSurfaceElevation(_world, _3dFocusWorld.X, _3dFocusWorld.Y);
+        var eyeWorld = new Vec3
+        {
+            X = _3dFocusWorld.X,
+            Y = _3dFocusWorld.Y,
+            Z = ground + CameraHeightAboveGroundM,
+        };
+        Point3D camPos;
         if (WorldSceneHelixBuilder.TryGetViewMapping(_world, out var origin, out var xyScale, out var hScale))
-            focus = WorldSceneHelixBuilder.ScaledFocusFromWorld(origin, _3dFocusWorld, xyScale, hScale);
+            camPos = WorldSceneHelixBuilder.ScaledFocusFromWorld(origin, eyeWorld, xyScale, hScale);
         else
-            focus = WorldScene3DBuilder.WorldToWpf(_3dFocusWorld);
-        var yaw = Sld3DYaw.Value * (Math.PI / 180);
-        var pitch = Sld3DPitch.Value * (Math.PI / 180);
-        var d = Sld3DDistance.Value;
-        var cp = Math.Cos(pitch);
-        var ox = cp * Math.Sin(yaw) * d;
-        var oy = Math.Sin(pitch) * d;
-        var oz = cp * Math.Cos(yaw) * d;
-        var camPos = focus + new Vector3D(ox, oy, oz);
+            camPos = WorldScene3DBuilder.WorldToWpf(eyeWorld);
         World3DCamera.Position = camPos;
-        var look = focus - camPos;
-        if (look.LengthSquared < 1e-12)
-            look = new Vector3D(0, 0, -1);
-        else
-            look.Normalize();
-        World3DCamera.LookDirection = look;
+        // World north (+Y) maps to decreasing Helix Z; horizontal look (0,0,-1) is north along the ground plane.
+        World3DCamera.LookDirection = new Vector3D(0, 0, -1);
         World3DCamera.UpDirection = new Vector3D(0, 1, 0);
     }
 
@@ -1604,16 +1602,17 @@ public partial class MainWindow : Window
     private void World3D_ApplyFocus_Click(object sender, RoutedEventArgs e)
     {
         if (!double.TryParse(Txt3DWorldX.Text, out var x)
-            || !double.TryParse(Txt3DWorldY.Text, out var y)
-            || !double.TryParse(Txt3DWorldZ.Text, out var z))
+            || !double.TryParse(Txt3DWorldY.Text, out var y))
         {
-            MessageBox.Show(this, "Enter valid X, Y, Z for the orbit focus point.", "3D scene",
+            MessageBox.Show(this, "Enter valid world X and Y for the camera position.", "3D scene",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        _3dFocusWorld = new Vec3 { X = x, Y = y, Z = z };
+        var g = WorldScene3DBuilder.SampleSurfaceElevation(_world, x, y);
+        _3dFocusWorld = new Vec3 { X = x, Y = y, Z = g + CameraHeightAboveGroundM };
         _3dFocusInitialized = true;
+        Txt3DWorldZ.Text = _3dFocusWorld.Z.ToString("F1");
         PreloadNavGridChunksFor3DView();
         Apply3DCameraOnly();
         if (_world.NavGridCellSource is NavGridChunkCellSource && Equals(MainTabs.SelectedItem, Scene3DTab) &&
@@ -1631,7 +1630,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var z = WorldScene3DBuilder.SampleSurfaceElevation(_world, x, y) + 1.5;
+        var z = WorldScene3DBuilder.SampleSurfaceElevation(_world, x, y) + CameraHeightAboveGroundM;
         Txt3DWorldZ.Text = z.ToString("F2");
     }
 
@@ -1640,22 +1639,12 @@ public partial class MainWindow : Window
         var b = _world.GlobalBounds;
         var cx = (b.Min.X + b.Max.X) * 0.5;
         var cy = (b.Min.Y + b.Max.Y) * 0.5;
-        var z = WorldScene3DBuilder.SampleSurfaceElevation(_world, cx, cy) + FocusClearanceAboveGround();
+        var z = WorldScene3DBuilder.SampleSurfaceElevation(_world, cx, cy) + CameraHeightAboveGroundM;
         _3dFocusWorld = new Vec3 { X = cx, Y = cy, Z = z };
         Txt3DWorldX.Text = cx.ToString("F1");
         Txt3DWorldY.Text = cy.ToString("F1");
         Txt3DWorldZ.Text = z.ToString("F1");
         _3dFocusInitialized = true;
-        var dx = b.Max.X - b.Min.X;
-        var dy = b.Max.Y - b.Min.Y;
-        var diag = Math.Sqrt(dx * dx + dy * dy);
-        if (WorldSceneHelixBuilder.TryGetViewMapping(_world, out _, out var xyScale, out _))
-        {
-            var viewDiag = diag * xyScale;
-            Sld3DDistance.Value = Math.Clamp(viewDiag * 0.55, Sld3DDistance.Minimum, Sld3DDistance.Maximum);
-        }
-        else
-            Sld3DDistance.Value = Math.Clamp(diag * 0.55, Sld3DDistance.Minimum, Sld3DDistance.Maximum);
         PreloadNavGridChunksFor3DView();
         Apply3DCameraOnly();
         if (_world.NavGridCellSource is NavGridChunkCellSource && Equals(MainTabs.SelectedItem, Scene3DTab) &&
@@ -1667,20 +1656,11 @@ public partial class MainWindow : Window
 
     private void WorldViewportDx_OnMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
-        {
-            var pitch = Sld3DPitch.Value + e.Delta * 0.048;
-            Sld3DPitch.Value = Math.Clamp(pitch, Sld3DPitch.Minimum, Sld3DPitch.Maximum);
-            Txt3DPitchValue.Text = Sld3DPitch.Value.ToString("F0");
-        }
-        else
-        {
-            var d = Sld3DDistance.Value * Math.Exp(-e.Delta * 0.0011);
-            Sld3DDistance.Value = Math.Clamp(d, Sld3DDistance.Minimum, Sld3DDistance.Maximum);
-            Txt3DDistanceValue.Text = Sld3DDistance.Value.ToString("F0");
-        }
-
-        Apply3DCameraOnly();
+        var fov = Sld3DFov.Value + e.Delta * 0.04;
+        Sld3DFov.Value = Math.Clamp(fov, Sld3DFov.Minimum, Sld3DFov.Maximum);
+        Txt3DFovValue.Text = Sld3DFov.Value.ToString("F0");
+        if (World3DCamera is not null)
+            World3DCamera.FieldOfView = Sld3DFov.Value;
         WorldViewportDx.InvalidateRender();
     }
 
@@ -1710,33 +1690,5 @@ public partial class MainWindow : Window
             RebuildWorld3DScene();
     }
 
-    private void WorldViewportDx_OnMouseDown(object sender, MouseButtonEventArgs e)
-    {
-        if (e.ChangedButton != MouseButton.Left)
-            return;
-        _viewportDragButton = MouseButton.Left;
-        _3dLastMouse = e.GetPosition(WorldViewportDx);
-        WorldViewportDx.CaptureMouse();
-    }
-
-    private void WorldViewportDx_OnMouseMove(object sender, MouseEventArgs e)
-    {
-        if (_viewportDragButton != MouseButton.Left)
-            return;
-        var p = e.GetPosition(WorldViewportDx);
-        var dx = p.X - _3dLastMouse.X;
-        var dy = p.Y - _3dLastMouse.Y;
-        _3dLastMouse = p;
-        Sld3DYaw.Value = Math.Clamp(Sld3DYaw.Value - dx * 0.32, Sld3DYaw.Minimum, Sld3DYaw.Maximum);
-        Sld3DPitch.Value = Math.Clamp(Sld3DPitch.Value + dy * 0.32, Sld3DPitch.Minimum, Sld3DPitch.Maximum);
-    }
-
-    private void WorldViewportDx_OnMouseUp(object sender, MouseButtonEventArgs e)
-    {
-        if (e.ChangedButton != MouseButton.Left || _viewportDragButton != MouseButton.Left)
-            return;
-        _viewportDragButton = null;
-        WorldViewportDx.ReleaseMouseCapture();
-    }
-
 }
+

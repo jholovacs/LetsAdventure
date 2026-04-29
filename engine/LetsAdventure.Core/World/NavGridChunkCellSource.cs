@@ -105,6 +105,57 @@ public sealed class NavGridChunkCellSource : INavGridCellSource, IDisposable
         PreloadChunksAroundCell(col, row, radiusChunks);
     }
 
+    /// <summary>
+    /// Drop chunks whose XY bounds do not intersect the axis-aligned square
+    /// [<paramref name="centerWorldX"/> ± <paramref name="halfExtentWorldMeters"/>],
+    /// [<paramref name="centerWorldY"/> ± <paramref name="halfExtentWorldMeters"/>].
+    /// </summary>
+    public void RetainChunksIntersectingWorldSquare(double centerWorldX, double centerWorldY,
+        double halfExtentWorldMeters)
+    {
+        if (halfExtentWorldMeters <= 0 || _cache.Count == 0)
+            return;
+        var minWx = centerWorldX - halfExtentWorldMeters;
+        var maxWx = centerWorldX + halfExtentWorldMeters;
+        var minWy = centerWorldY - halfExtentWorldMeters;
+        var maxWy = centerWorldY + halfExtentWorldMeters;
+        List<(int cx, int cy)>? toRemove = null;
+        lock (_gate)
+        {
+            foreach (var kv in _cache)
+            {
+                ChunkWorldBounds2D(_manifest, kv.Key.cx, kv.Key.cy, out var ax0, out var ax1, out var ay0, out var ay1);
+                var intersects = ax1 >= minWx && ax0 <= maxWx && ay1 >= minWy && ay0 <= maxWy;
+                if (!intersects)
+                    (toRemove ??= new List<(int cx, int cy)>()).Add(kv.Key);
+            }
+
+            if (toRemove is null)
+                return;
+            foreach (var key in toRemove)
+            {
+                if (!_cache.TryGetValue(key, out var ent))
+                    continue;
+                _lru.Remove(ent.LruNode);
+                _cache.Remove(key);
+            }
+        }
+    }
+
+    private static void ChunkWorldBounds2D(NavGridChunkManifest m, int cx, int cy,
+        out double minX, out double maxX, out double minY, out double maxY)
+    {
+        var cs = m.CellSize <= 0 ? 1 : m.CellSize;
+        var cw = Math.Max(1, m.ChunkWidthCells);
+        var ch = Math.Max(1, m.ChunkHeightCells);
+        var col0 = cx * cw;
+        var row0 = cy * ch;
+        minX = m.OriginX + col0 * cs;
+        maxX = m.OriginX + (col0 + cw) * cs;
+        minY = m.OriginY + row0 * cs;
+        maxY = m.OriginY + (row0 + ch) * cs;
+    }
+
     private ChunkCacheEntry? GetOrLoadChunk(int cx, int cy)
     {
         lock (_gate)

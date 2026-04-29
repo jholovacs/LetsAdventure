@@ -257,7 +257,7 @@
           <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,8,0">
             <StackPanel Margin="8">
               <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Muted}"
-                         Text="World X/Y horizontal, Z up. LMB + drag orbits. Mouse wheel zooms. WASD pans the view target on the ground plane (move through the scene). Use focus fields or “Center on bounds” to jump." />
+                         Text="World X/Y horizontal, Z up. First-person preview: camera sits 2 m above the sampled terrain, facing north (+Y). WASD moves on the ground at fixed heading. Chunked nav data loads in a 2 km radius (4 km square); chunks beyond that are unloaded as you move. Wheel adjusts field of view. Use the fields below or “Center on bounds” to jump." />
               <GroupBox Header="Navigate to (world)" Margin="0,10,0,0">
                 <StackPanel Margin="6">
                   <StackPanel Orientation="Horizontal">
@@ -267,27 +267,28 @@
                     <TextBox x:Name="Txt3DWorldY" Width="88" />
                   </StackPanel>
                   <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                    <Label Content="Z" Width="28" />
+                    <Label Content="Z" Width="28" ToolTip="Eye height above datum (2 m above ground when sampled)" />
                     <TextBox x:Name="Txt3DWorldZ" Width="88" />
-                    <Button Content="Sample Z from grid" Margin="8,0,0,0" Padding="6,2" Click="World3D_SampleZ_Click" />
+                    <Button Content="Sample Z (ground + 2 m)" Margin="8,0,0,0" Padding="6,2" Click="World3D_SampleZ_Click" />
                   </StackPanel>
-                  <Button Content="Set camera focus here" Margin="0,8,0,0" HorizontalAlignment="Left" Click="World3D_ApplyFocus_Click" />
+                  <Button Content="Move camera to X/Y" Margin="0,8,0,0" HorizontalAlignment="Left" Click="World3D_ApplyFocus_Click" />
                   <Button Content="Center on world bounds" Margin="0,6,0,0" HorizontalAlignment="Left" Click="World3D_CenterBounds_Click" />
                 </StackPanel>
               </GroupBox>
-              <GroupBox Header="Perspective / orbit" Margin="0,10,0,0">
+              <GroupBox Header="Camera" Margin="0,10,0,0">
                 <StackPanel Margin="6">
-                  <Label Content="Azimuth (°) — horizontal orbit" />
-                  <Slider x:Name="Sld3DYaw" Minimum="-180" Maximum="180" Value="40" TickFrequency="15"
-                          IsSnapToTickEnabled="False" ValueChanged="World3D_OrbitSlider_ValueChanged" />
-                  <TextBlock x:Name="Txt3DYawValue" Text="40" Margin="0,-4,0,4" />
-                  <Label Content="Elevation (°)" />
-                  <Slider x:Name="Sld3DPitch" Minimum="-85" Maximum="85" Value="52" ValueChanged="World3D_OrbitSlider_ValueChanged" />
-                  <TextBlock x:Name="Txt3DPitchValue" Text="52" Margin="0,-4,0,4" />
-                  <Label Content="Distance (editor units — orbit radius from focus)" />
-                  <Slider x:Name="Sld3DDistance" Minimum="8" Maximum="2000000" Value="2200" ValueChanged="World3D_OrbitSlider_ValueChanged"
-                          ToolTip="How far the camera sits from the orbit focus in scaled view space. Previously the minimum was 120, which blocked tight close-ups." />
-                  <TextBlock x:Name="Txt3DDistanceValue" Text="2200" Margin="0,-4,0,4" />
+                  <StackPanel x:Name="Panel3DLegacyOrbitSliders" Visibility="Collapsed">
+                    <Label Content="Azimuth (legacy)" />
+                    <Slider x:Name="Sld3DYaw" Minimum="-180" Maximum="180" Value="40" TickFrequency="15"
+                            IsSnapToTickEnabled="False" ValueChanged="World3D_OrbitSlider_ValueChanged" />
+                    <TextBlock x:Name="Txt3DYawValue" Text="40" Margin="0,-4,0,4" />
+                    <Label Content="Elevation (legacy)" />
+                    <Slider x:Name="Sld3DPitch" Minimum="-85" Maximum="85" Value="52" ValueChanged="World3D_OrbitSlider_ValueChanged" />
+                    <TextBlock x:Name="Txt3DPitchValue" Text="52" Margin="0,-4,0,4" />
+                    <Label Content="Distance (legacy)" />
+                    <Slider x:Name="Sld3DDistance" Minimum="8" Maximum="2000000" Value="2200" ValueChanged="World3D_OrbitSlider_ValueChanged" />
+                    <TextBlock x:Name="Txt3DDistanceValue" Text="2200" Margin="0,-4,0,4" />
+                  </StackPanel>
                   <Label Content="Field of view (°)" />
                   <Slider x:Name="Sld3DFov" Minimum="25" Maximum="90" Value="55" ValueChanged="World3D_FovSlider_ValueChanged" />
                   <TextBlock x:Name="Txt3DFovValue" Text="55" Margin="0,-4,0,0" />
@@ -295,11 +296,11 @@
                   <Slider x:Name="Sld3DTerrainSub" Minimum="1" Maximum="6" Value="3" TickFrequency="1"
                           IsSnapToTickEnabled="True" ValueChanged="World3D_TerrainDetail_Changed" />
                   <TextBlock x:Name="Txt3DTerrainSubValue" Text="3" Margin="0,-4,0,4" />
-                  <Label Content="Chunked worlds: high-res radius (nav cells each side of orbit focus; 0 = distant coarse only)"
+                  <Label Content="Chunked worlds: high-res radius (nav cells each side of camera; 0 = distant coarse only)"
                          Margin="0,8,0,0" />
                   <Slider x:Name="Sld3DChunkDetailHalf" Minimum="0" Maximum="192" Value="72" TickFrequency="8"
                           IsSnapToTickEnabled="True" ValueChanged="World3D_ChunkDetailHalf_Changed"
-                          ToolTip="Rebuild 3D after moving focus (WASD / Set focus) to refresh this patch. Capped for GPU." />
+                          ToolTip="High-res terrain is rebuilt automatically as you walk (about every 200 m); you can adjust patch size here." />
                   <TextBlock x:Name="Txt3DChunkDetailHalfValue" Text="72" Margin="0,-4,0,4" />
                   <CheckBox x:Name="Chk3DTerrainHaze" Content="Aerial perspective (distant terrain fades toward sky)"
                             IsChecked="True" Checked="World3D_TerrainHaze_Changed" Unchecked="World3D_TerrainHaze_Changed" />
@@ -328,11 +329,8 @@
                             IsRotationEnabled="False"
                             IsPanEnabled="False"
                             IsZoomEnabled="False"
-                            ToolTip="Wheel: zoom orbit distance. Shift+wheel: orbit elevation (pitch). LMB drag: yaw/pitch."
-                            MouseWheel="WorldViewportDx_OnMouseWheel"
-                            MouseDown="WorldViewportDx_OnMouseDown"
-                            MouseMove="WorldViewportDx_OnMouseMove"
-                            MouseUp="WorldViewportDx_OnMouseUp">
+                            ToolTip="Mouse wheel: field of view. WASD: walk (north +Y). Chunked worlds stream within 2 km."
+                            MouseWheel="WorldViewportDx_OnMouseWheel">
               <hx:Viewport3DX.Camera>
                 <hx:PerspectiveCamera x:Name="World3DCamera"
                                       Position="0,1200,8000"
