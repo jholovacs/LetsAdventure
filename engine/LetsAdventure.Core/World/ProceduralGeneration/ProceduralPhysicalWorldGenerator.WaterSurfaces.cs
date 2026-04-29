@@ -45,33 +45,45 @@ public static partial class ProceduralPhysicalWorldGenerator
             for (var pi = 0; pi < riverPaths.Count; pi++)
                 surfPathLens[pi] = RiverPathWorldArcLength(riverPaths[pi], spec);
 
-            ParallelForCols(cols, rows, (c, r) =>
-            {
-                if (!isRiver[c, r] || isOcean[c, r] || lakeId[c, r] != 0)
-                    return;
-                var wx = spec.MinX + (c + 0.5) * cell;
-                var wy = spec.MinY + (r + 0.5) * cell;
-                var bestDist = double.PositiveInfinity;
-                var bestAlong = 0.0;
-                var bestLen = 1.0;
-                for (var pi = 0; pi < riverPaths.Count; pi++)
-                {
-                    var path = riverPaths[pi];
-                    if (path.Count == 0)
-                        continue;
-                    ClosestPointOnRiverPath(wx, wy, path, spec, out var d, out var sAlong);
-                    if (d < bestDist)
-                    {
-                        bestDist = d;
-                        bestAlong = sAlong;
-                        bestLen = Math.Max(surfPathLens[pi], 1e-6);
-                    }
-                }
+            var fallbackHalfW = Math.Max(spec.RiverChannelHalfWidthWorld, cell * 0.5);
+            var hwMax = spec.RiverChannelHalfWidthMaxWorld > 1e-6
+                ? spec.RiverChannelHalfWidthMaxWorld
+                : Math.Max(fallbackHalfW * 2.2, spec.RiverChannelHalfWidthMinWorld * 2.0);
+            var cellCapM = cell * RiverCorridorHalfWidthCapCellMultiple;
+            hwMax = Math.Min(Math.Min(hwMax, cellCapM), RiverCorridorHalfWidthAbsoluteMaxM);
+            var expandCells = (int)Math.Ceiling(hwMax / Math.Max(cell, 1e-9)) + 8;
 
-                var tLong = bestLen > 1e-9 ? Math.Clamp(bestAlong / bestLen, 0, 1) : 1.0;
-                var zSurf = oceanWaterZ + (1 - tLong) * Math.Max(0.55, spec.TerrainAmplitude * 0.07);
-                h[c, r] = zSurf;
-            });
+            if (!RiverChannelCarveVulkan.TryApplyRiverWaterSurfaceZ(h, cols, rows, cell, spec, riverPaths,
+                    isRiver, isOcean, lakeId, oceanWaterZ, expandCells, surfPathLens, progress))
+            {
+                ParallelForCols(cols, rows, (c, r) =>
+                {
+                    if (!isRiver[c, r] || isOcean[c, r] || lakeId[c, r] != 0)
+                        return;
+                    var wx = spec.MinX + (c + 0.5) * cell;
+                    var wy = spec.MinY + (r + 0.5) * cell;
+                    var bestDist = double.PositiveInfinity;
+                    var bestAlong = 0.0;
+                    var bestLen = 1.0;
+                    for (var pi = 0; pi < riverPaths.Count; pi++)
+                    {
+                        var path = riverPaths[pi];
+                        if (path.Count == 0)
+                            continue;
+                        ClosestPointOnRiverPath(wx, wy, path, spec, out var d, out var sAlong);
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestAlong = sAlong;
+                            bestLen = Math.Max(surfPathLens[pi], 1e-6);
+                        }
+                    }
+
+                    var tLong = bestLen > 1e-9 ? Math.Clamp(bestAlong / bestLen, 0, 1) : 1.0;
+                    var zSurf = oceanWaterZ + (1 - tLong) * Math.Max(0.55, spec.TerrainAmplitude * 0.07);
+                    h[c, r] = zSurf;
+                });
+            }
         }
 
         if (ExpectLongRunningGridPhase(cols, rows))

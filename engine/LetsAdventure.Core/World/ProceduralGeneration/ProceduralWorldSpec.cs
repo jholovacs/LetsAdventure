@@ -27,6 +27,7 @@ public sealed class ProceduralWorldSpec
     public int NoiseOctaves { get; set; } = 4;
 
     public double LakeRadiusWorld { get; set; } = 56;
+    /// <summary>Reference channel half-width (m) for discharge/slope width curve; real rivers are often ~10–50 m half.</summary>
     public double RiverChannelHalfWidthWorld { get; set; } = 7;
     public double LakeDepth { get; set; } = 3.5;
 
@@ -65,7 +66,21 @@ public sealed class ProceduralWorldSpec
     /// <summary>Volcanic-style peaks added on high, rugged terrain (0 = none).</summary>
     public int MountainPeakCount { get; set; }
 
-    /// <summary>Peak lift relative to <see cref="TerrainAmplitude"/> (Gaussian massifs).</summary>
+    /// <summary>
+    /// Minimum absolute summit Z (m). Applied when <see cref="MaxZBound"/> − <see cref="MountainPeakClearanceBelowMaxZM"/>
+    /// is above this value; otherwise only slope geometry is enforced.
+    /// </summary>
+    public double MountainPeakMinAbsoluteZM { get; set; } = 1000;
+
+    /// <summary>Summit Z must stay at least this far below <see cref="MaxZBound"/> (m).</summary>
+    public double MountainPeakClearanceBelowMaxZM { get; set; } = 100;
+
+    /// <summary>
+    /// Minimum terrain incline (degrees from horizontal) on the massif flank toward the summit: cone rise/run ≥ tan(angle).
+    /// </summary>
+    public double MountainMinInclineTowardPeakDegrees { get; set; } = 30;
+
+    /// <summary>Peak lift relative to <see cref="TerrainAmplitude"/> when absolute peak limits are not active.</summary>
     public double MountainLiftScale { get; set; } = 0.62;
 
     /// <summary>
@@ -77,7 +92,7 @@ public sealed class ProceduralWorldSpec
     /// Calibrated channel headwater budget is about √(land cells) × this; higher → more creeks / tributaries before
     /// thresholds are tightened.
     /// </summary>
-    public double DrainageHeadwaterBudgetFactor { get; set; } = 2.75;
+    public double DrainageHeadwaterBudgetFactor { get; set; } = 2.35;
 
     /// <summary>
     /// Tributary density vs basin size. Higher values require relatively larger catchments (fewer small channels).
@@ -88,6 +103,13 @@ public sealed class ProceduralWorldSpec
     /// Fraction of the largest accumulated flow on the grid used to classify main-stem segments (after auto calibration).
     /// </summary>
     public double DrainageMainStemAccumFraction { get; set; } = 0.052;
+
+    /// <summary>
+    /// Multiplier on the D8 tributary headwater contributing-area floor (river channel extent on land). 1 = engine
+    /// default. Higher → stricter headwaters → drier land (less freshwater routing). Baseline Map tab maps a percent P to
+    /// <c>100 / P</c> (100% = default, 50% ≈ twice as strict).
+    /// </summary>
+    public double LandFreshwaterStrictness { get; set; } = 1.0;
 
     /// <summary>Minimum bowl depth (m) for a land depression to become a pond/lake.</summary>
     public double DepressionLakeMinDepthM { get; set; } = 0.12;
@@ -129,6 +151,7 @@ public sealed class ProceduralWorldSpec
     public double HydrologyWidthCurveScale { get; set; } = 1.0;
 
     /// <summary>Minimum channel half-width (m) at any vertex after hydrology scaling.</summary>
+    /// <summary>Minimum half-width (m) after hydrology; clamped with an engine absolute max (~50 m half).</summary>
     public double RiverChannelHalfWidthMinWorld { get; set; } = 1.85;
 
     /// <summary>Maximum channel half-width (m) per vertex; if ≤ 0, uses 2.75 × <see cref="RiverChannelHalfWidthWorld"/>.</summary>

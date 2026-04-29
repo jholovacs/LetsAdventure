@@ -133,6 +133,61 @@ public static class NavGridChunkIO
         return manifest;
     }
 
+    /// <summary>Reconstruct a full row-major <see cref="NavCellDefinition"/> list from a chunk directory (must match <c>manifest.json</c>).</summary>
+    public static List<NavCellDefinition> MaterializeCellsFromDirectory(string directory,
+        IProgress<string>? progress = null)
+    {
+        if (!TryLoadManifest(directory, out var m) || m is null)
+            throw new InvalidOperationException("Nav grid chunk manifest not found or invalid in " + directory);
+        var cols = m.Columns;
+        var rows = m.Rows;
+        if (cols < 1 || rows < 1)
+            throw new InvalidOperationException("Manifest has invalid dimensions.");
+
+        var chunkW = m.ChunkWidthCells;
+        var chunkH = m.ChunkHeightCells;
+        if (chunkW < 1 || chunkH < 1)
+            throw new InvalidOperationException("Manifest has invalid chunk size.");
+
+        var chunksX = m.ChunksX;
+        var chunksY = m.ChunksY;
+        var buffer = new NavCellDefinition[cols * rows];
+        var done = 0;
+        var total = Math.Max(1, chunksX * chunksY);
+
+        for (var cy = 0; cy < chunksY; cy++)
+        {
+            for (var cx = 0; cx < chunksX; cx++)
+            {
+                var col0 = cx * chunkW;
+                var row0 = cy * chunkH;
+                var w = Math.Min(chunkW, cols - col0);
+                var h = Math.Min(chunkH, rows - row0);
+                if (w <= 0 || h <= 0)
+                    continue;
+
+                var path = Path.Combine(directory, ChunkFileName(cx, cy));
+                var cells = ReadChunkFile(path, out var fcx, out var fcy, out var lw, out var lh);
+                if (fcx != cx || fcy != cy || lw != w || lh != h)
+                    throw new InvalidDataException(
+                        $"Chunk c_{cx:0000}_{cy:0000}.bin size or coordinates do not match manifest.");
+
+                for (var ly = 0; ly < h; ly++)
+                {
+                    for (var lx = 0; lx < w; lx++)
+                        buffer[(row0 + ly) * cols + (col0 + lx)] = cells[ly * w + lx];
+                }
+
+                done++;
+                if (progress != null && (done == 1 || done == total || done % Math.Max(1, total / 16) == 0))
+                    Report(progress, $"[navgrid chunks] Read {done}/{total} chunks into memory…");
+            }
+        }
+
+        Report(progress, "[navgrid chunks] Full grid materialized.");
+        return new List<NavCellDefinition>(buffer);
+    }
+
     public static bool TryLoadManifest(string directory, out NavGridChunkManifest? manifest)
     {
         manifest = null;

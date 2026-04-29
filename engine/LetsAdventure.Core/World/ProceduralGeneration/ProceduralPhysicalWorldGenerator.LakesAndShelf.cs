@@ -286,8 +286,17 @@ public static partial class ProceduralPhysicalWorldGenerator
             }
 
             var meanBowl = dropSum / comp.Count;
-            var drop = Math.Clamp(meanBowl * 0.42, spec.MaxLandStepOrthogonal * 0.08,
-                Math.Min(spec.TerrainAmplitude * 0.11, spec.LakeDepth * 0.55));
+            var rawDrop = meanBowl * 0.42;
+            var maxDrop = Math.Min(spec.TerrainAmplitude * 0.11, spec.LakeDepth * 0.55);
+            // MaxLandStepOrthogonal can be cell-scaled (e.g. baseline worlds); do not let min exceed max for Math.Clamp.
+            var minDrop = Math.Min(spec.MaxLandStepOrthogonal * 0.08, maxDrop);
+            double drop;
+            if (maxDrop <= 0)
+                drop = 0;
+            else if (minDrop >= maxDrop)
+                drop = Math.Min(Math.Max(0, rawDrop), maxDrop);
+            else
+                drop = Math.Clamp(rawDrop, minDrop, maxDrop);
             Parallel.For(0, comp.Count, idx =>
             {
                 var (cc, rr) = comp[idx];

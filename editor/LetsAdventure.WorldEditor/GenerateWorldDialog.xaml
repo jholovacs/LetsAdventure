@@ -4,7 +4,9 @@
         Title="Generate procedural world"
         Height="520" Width="440"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize">
+        ResizeMode="NoResize"
+        Background="{DynamicResource Theme.Window.Background}"
+        Foreground="{DynamicResource Theme.Window.Foreground}">
   <ScrollViewer VerticalScrollBarVisibility="Auto">
     <StackPanel Margin="16">
       <TextBlock TextWrapping="Wrap" Margin="0,0,0,12"

@@ -61,6 +61,50 @@ public sealed class NavGridChunkCellSource : INavGridCellSource, IDisposable
         return true;
     }
 
+    /// <summary>Best-effort load of one chunk file into the LRU (no-op if out of bounds).</summary>
+    public void PreloadChunk(int cx, int cy)
+    {
+        if ((uint)cx >= (uint)_manifest.ChunksX || (uint)cy >= (uint)_manifest.ChunksY)
+            return;
+        var cw = _manifest.ChunkWidthCells;
+        var ch = _manifest.ChunkHeightCells;
+        TryGetCell(cx * cw, cy * ch, out _);
+    }
+
+    /// <summary>Preload every chunk whose index is within [−radius, +radius] of the chunk containing <paramref name="col"/>, <paramref name="row"/>.</summary>
+    public void PreloadChunksAroundCell(int col, int row, int radiusChunks)
+    {
+        if (radiusChunks < 1 || _manifest.ChunksX < 1 || _manifest.ChunksY < 1)
+            return;
+        var cw = _manifest.ChunkWidthCells;
+        var ch = _manifest.ChunkHeightCells;
+        if (cw < 1 || ch < 1)
+            return;
+        var cx = col / cw;
+        var cy = row / ch;
+        var r = Math.Clamp(radiusChunks, 1, Math.Max(_manifest.ChunksX, _manifest.ChunksY) + 4);
+        var cx0 = Math.Max(0, cx - r);
+        var cx1 = Math.Min(_manifest.ChunksX - 1, cx + r);
+        var cy0 = Math.Max(0, cy - r);
+        var cy1 = Math.Min(_manifest.ChunksY - 1, cy + r);
+        for (var ccy = cy0; ccy <= cy1; ccy++)
+        {
+            for (var ccx = cx0; ccx <= cx1; ccx++)
+                PreloadChunk(ccx, ccy);
+        }
+    }
+
+    /// <summary>Preload around the grid cell containing world (<paramref name="worldX"/>, <paramref name="worldY"/>).</summary>
+    public void PreloadChunksAroundWorldXY(double worldX, double worldY, int radiusChunks)
+    {
+        var cs = _manifest.CellSize <= 0 ? 1 : _manifest.CellSize;
+        var col = (int)Math.Floor((worldX - _manifest.OriginX) / cs);
+        var row = (int)Math.Floor((worldY - _manifest.OriginY) / cs);
+        col = Math.Clamp(col, 0, Math.Max(0, _manifest.Columns - 1));
+        row = Math.Clamp(row, 0, Math.Max(0, _manifest.Rows - 1));
+        PreloadChunksAroundCell(col, row, radiusChunks);
+    }
+
     private ChunkCacheEntry? GetOrLoadChunk(int cx, int cy)
     {
         lock (_gate)

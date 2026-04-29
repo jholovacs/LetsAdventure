@@ -1,0 +1,147 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+struct GpuSeg {
+    vec4 e;
+    float arcBase;
+    float segLen;
+    int pathIdx;
+    int _pad;
+};
+
+layout(std430, binding = 0) readonly buffer ParamsBuf {
+    float minX;
+    float minY;
+    float cell;
+    float oceanWaterZ;
+    float terrainAmp;
+    float effCarve;
+    float fallbackHalfW;
+    float cellTimes115;
+    int cols;
+    int rows;
+    int tilesX;
+    int tilesY;
+    int tileW;
+    int tileH;
+    int pathCount;
+    int _pad;
+} params_;
+
+layout(std430, binding = 1) readonly buffer SegBuf {
+    GpuSeg segs[];
+};
+
+layout(std430, binding = 2) readonly buffer TileOffBuf {
+    uint tileOff[];
+};
+
+layout(std430, binding = 3) readonly buffer TileIdxBuf {
+    uint tileSegIdx[];
+};
+
+layout(std430, binding = 4) readonly buffer PathLenBuf {
+    float pathLen[];
+};
+
+layout(std430, binding = 5) buffer HeightBuf {
+    float h[];
+};
+
+layout(std430, binding = 6) readonly buffer HalfWBuf {
+    float halfW[];
+};
+
+layout(std430, binding = 7) readonly buffer FlagBuf {
+    uint fl[];
+};
+
+void closestOnSegment(float px, float py, float x0, float y0, float x1, float y1, out float dist, out float u)
+{
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-18)
+    {
+        float qx = px - x0;
+        float qy = py - y0;
+        dist = sqrt(qx * qx + qy * qy);
+        u = 0.0;
+        return;
+    }
+    u = ((px - x0) * dx + (py - y0) * dy) / lenSq;
+    u = clamp(u, 0.0, 1.0);
+    float qx = x0 + u * dx;
+    float qy = y0 + u * dy;
+    float rx = px - qx;
+    float ry = py - qy;
+    dist = sqrt(rx * rx + ry * ry);
+}
+
+void main()
+{
+    uint c = gl_GlobalInvocationID.x;
+    uint r = gl_GlobalInvocationID.y;
+    if (int(c) >= params_.cols || int(r) >= params_.rows)
+        return;
+
+    uint colsU = uint(params_.cols);
+    uint idx = r * colsU + c;
+    uint flv = fl[idx];
+    if ((flv & 1u) == 0u)
+        return;
+    if ((flv & 2u) != 0u)
+        return;
+    if ((flv & 4u) != 0u)
+        return;
+
+    float hwCell = halfW[idx];
+    float hwUse = hwCell > 1e-6 ? hwCell : params_.fallbackHalfW;
+    float maxLat = hwUse + params_.cellTimes115;
+
+    float wx = params_.minX + (float(c) + 0.5) * params_.cell;
+    float wy = params_.minY + (float(r) + 0.5) * params_.cell;
+
+    float bestDist = 1e38;
+    float bestAlong = 0.0;
+    float bestLen = 1.0;
+
+    uint tx = c / uint(params_.tileW);
+    uint ty = r / uint(params_.tileH);
+    uint tileId = ty * uint(params_.tilesX) + tx;
+    uint t0 = tileOff[tileId];
+    uint t1 = tileOff[tileId + 1u];
+
+    for (uint ti = t0; ti < t1; ti++)
+    {
+        uint si = tileSegIdx[ti];
+        GpuSeg s = segs[si];
+        float d;
+        float u;
+        closestOnSegment(wx, wy, s.e.x, s.e.y, s.e.z, s.e.w, d, u);
+        if (d < bestDist)
+        {
+            bestDist = d;
+            bestAlong = s.arcBase + u * s.segLen;
+            int pi = s.pathIdx;
+            if (pi >= 0 && pi < params_.pathCount)
+                bestLen = max(pathLen[pi], 1e-6);
+        }
+    }
+
+    if (bestDist > maxLat)
+        return;
+
+    float tnorm = bestLen > 1e-9 ? clamp(bestAlong / bestLen, 0.0, 1.0) : 0.0;
+    float longitudinal = params_.oceanWaterZ + (1.0 - tnorm) * params_.terrainAmp * 0.32;
+    float thalweg = longitudinal - params_.effCarve;
+    float bank = longitudinal - params_.effCarve * 0.26;
+    float hwCross = max(hwUse, 1e-3);
+    float uu = clamp(bestDist / hwCross, 0.0, 1.0);
+    float cross = cos(0.5 * 3.14159265359 * uu);
+    cross *= cross;
+    float target = bank + (thalweg - bank) * cross;
+    float oldH = h[idx];
+    h[idx] = min(oldH, target);
+}

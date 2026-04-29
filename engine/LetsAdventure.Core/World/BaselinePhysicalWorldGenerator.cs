@@ -3,49 +3,136 @@ using LetsAdventure.Core.Simulation;
 
 namespace LetsAdventure.Core.World;
 
-/// <summary>Large-scale baseline worlds: 2^31 × 2^31 XY, Z ∈ [0, 12288], ground reference 0, BSP lore regions, territories, and extra features.</summary>
-public static class BaselinePhysicalWorldGenerator
+/// <summary>Inputs for <see cref="BaselinePhysicalWorldGenerator.Generate(BaselineGenerationRequest, IProgress{string}?)"/>.</summary>
+public sealed class BaselineGenerationRequest
 {
-    /// <summary>2^31 — single-world XY extent (WPF/doubles handle this range; nav uses a coarse grid).</summary>
-    public const double DefaultExtentXy = 2147483648.0;
+    /// <summary>Optional; when null, a random master seed is chosen.</summary>
+    public int? Seed { get; init; }
 
-    /// <summary>Vertical bound after elevation normalize; large enough that mountain relief is not flattened by clamping.</summary>
-    public const double DefaultMaxZ = 12288;
-
-    public const double GroundLevelZ = 0;
+    public double MinX { get; init; }
+    public double MinY { get; init; }
+    public double MinZ { get; init; }
+    public double MaxX { get; init; }
+    public double MaxY { get; init; }
+    public double MaxZ { get; init; }
 
     /// <summary>
-    /// Columns and rows of the nav / hydrology sampling grid across the <b>full</b> <see cref="DefaultExtentXy"/> world
-    /// (not a small local patch). Larger values increase detail, RAM, and generation time (~quadratic in this number).
+    /// Added to normalized water surface and bed Z for wet cells only (ocean, lakes, rivers).
+    /// Negative values lower water relative to dry land so coastlines read less flooded.
+    /// </summary>
+    public double WaterSurfaceOffsetM { get; init; } = -2200;
+
+    /// <summary>
+    /// Multiplier on tributary headwater drainage threshold (see <see cref="ProceduralWorldSpec.LandFreshwaterStrictness"/>).
+    /// Use 1 for the engine default; raise for drier land.
+    /// </summary>
+    public double LandFreshwaterStrictness { get; init; } = 1.0;
+
+    /// <summary>Default authoring bounds: 0…2M XY, Z −10k…10k (editor map tab). See <see cref="BaselinePhysicalWorldGenerator.ClassicBaselineExtentXy"/> for the historic huge extent.</summary>
+    public static BaselineGenerationRequest Default { get; } = new()
+    {
+        MinX = 0,
+        MinY = 0,
+        MinZ = BaselinePhysicalWorldGenerator.DefaultMinZ,
+        MaxX = BaselinePhysicalWorldGenerator.DefaultExtentXy,
+        MaxY = BaselinePhysicalWorldGenerator.DefaultExtentXy,
+        MaxZ = BaselinePhysicalWorldGenerator.DefaultMaxZ,
+    };
+
+    public void Validate()
+    {
+        if (MaxX <= MinX || MaxY <= MinY || MaxZ <= MinZ)
+            throw new ArgumentException("Baseline bounds require Min < Max on each axis.");
+        if (!(double.IsFinite(MinX) && double.IsFinite(MinY) && double.IsFinite(MinZ)
+              && double.IsFinite(MaxX) && double.IsFinite(MaxY) && double.IsFinite(MaxZ)))
+            throw new ArgumentException("Baseline bounds must be finite.");
+        if (!double.IsFinite(WaterSurfaceOffsetM))
+            throw new ArgumentException("Water surface offset must be a finite number.");
+        if (!double.IsFinite(LandFreshwaterStrictness) || LandFreshwaterStrictness is < 0.12 or > 40)
+            throw new ArgumentException("Land freshwater strictness must be between 0.12 and 40.");
+    }
+}
+
+/// <summary>Large-scale baseline worlds: configurable XY/Z bounds, hydrology, ocean, nav grid, regions, territories, features.</summary>
+public static class BaselinePhysicalWorldGenerator
+{
+    /// <summary>Default max X/Y for new maps and <see cref="BaselineGenerationRequest.Default"/> (meters).</summary>
+    public const double DefaultExtentXy = 2_000_000;
+
+    /// <summary>Default min Z for new maps and <see cref="BaselineGenerationRequest.Default"/> (meters).</summary>
+    public const double DefaultMinZ = -10_000;
+
+    /// <summary>Default max Z for new maps and <see cref="BaselineGenerationRequest.Default"/> (meters).</summary>
+    public const double DefaultMaxZ = 10_000;
+
+    /// <summary>Historic single-world XY extent — 2³¹ m (optional very large baselines).</summary>
+    public const double ClassicBaselineExtentXy = 2147483648.0;
+
+    /// <summary>Historic vertical bound for classic baselines (meters Z).</summary>
+    public const double ClassicBaselineMaxZ = 12288;
+
+    /// <summary>
+    /// World Z of mean sea level for an axis-aligned volume: midpoint of <paramref name="minZ"/>…<paramref name="maxZ"/>.
+    /// Baseline generation maps the procedural ocean surface to this value.
+    /// </summary>
+    public static double SeaLevelZFromBounds(double minZ, double maxZ) => (minZ + maxZ) * 0.5;
+
+    /// <summary>
+    /// Nominal height <b>above mean sea level</b> where shoreline / lowland terrain contours are intended to sit (meters).
+    /// Generation anchors the ocean surface to <see cref="SeaLevelZFromBounds"/>; land and bathymetry inherit relative heights from synthesis.
+    /// Reserved for future tuning — keep 0 to pin open-ocean surface exactly at mid-Z.
+    /// </summary>
+    public const double GroundLevelAboveSeaLevelM = 0;
+
+    /// <summary>
+    /// Columns and rows of the nav / hydrology sampling grid along the longer XY span (not a small local patch).
+    /// Larger values increase detail, RAM, and generation time (~quadratic in this number).
     /// </summary>
     public const int BaselineGridDimension = 4096;
 
-    public static PhysicalWorldGenerationResult Generate(int? seed = null, IProgress<string>? progress = null)
+    public static PhysicalWorldGenerationResult Generate(int? seed = null, IProgress<string>? progress = null) =>
+        Generate(new BaselineGenerationRequest { Seed = seed, MinX = BaselineGenerationRequest.Default.MinX, MinY = BaselineGenerationRequest.Default.MinY, MinZ = BaselineGenerationRequest.Default.MinZ, MaxX = BaselineGenerationRequest.Default.MaxX, MaxY = BaselineGenerationRequest.Default.MaxY, MaxZ = BaselineGenerationRequest.Default.MaxZ }, progress);
+
+    public static PhysicalWorldGenerationResult Generate(BaselineGenerationRequest request, IProgress<string>? progress = null)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        request.Validate();
+
         progress?.Report("Starting baseline world generation…");
-        var masterSeed = seed ?? Random.Shared.Next();
+        var masterSeed = request.Seed ?? Random.Shared.Next();
         progress?.Report($"Master seed: {masterSeed}");
         var rng = new Random(masterSeed);
         var procSeed = rng.Next();
 
-        var span = DefaultExtentXy;
+        var minX = request.MinX;
+        var minY = request.MinY;
+        var minZ = request.MinZ;
+        var maxX = request.MaxX;
+        var maxY = request.MaxY;
+        var maxZ = request.MaxZ;
+
+        var extentX = maxX - minX;
+        var extentY = maxY - minY;
+        var span = Math.Max(extentX, extentY);
         var cell = span / BaselineGridDimension;
 
         var proc = new ProceduralWorldSpec
         {
-            MinX = 0,
-            MinY = 0,
-            MaxX = DefaultExtentXy,
-            MaxY = DefaultExtentXy,
-            MinZBound = GroundLevelZ,
-            MaxZBound = DefaultMaxZ,
+            MinX = minX,
+            MinY = minY,
+            MaxX = maxX,
+            MaxY = maxY,
+            MinZBound = minZ,
+            MaxZBound = maxZ,
             CellSize = cell,
             Seed = procSeed,
             MaxLandStepOrthogonal = Math.Max(80, cell * 0.038),
             TerrainAmplitude = 1520,
             NoiseOctaves = 6,
             LakeRadiusWorld = span * 0.015,
-            RiverChannelHalfWidthWorld = span * 0.0029,
+            // Human-scale channels (~20–100 m across); widths do not scale with map span.
+            RiverChannelHalfWidthWorld = 22,
+            RiverChannelHalfWidthMinWorld = 9,
             LakeDepth = 92,
             FlowDirectionDownstream = new GeoVec2 { X = 1, Y = 0.08 },
             UphillPathPenalty = 34,
@@ -53,8 +140,8 @@ public static class BaselinePhysicalWorldGenerator
             RiverBedCarve = 44,
             GeneratedRegionId = "region.baseline_placeholder",
             ContinentalDomeAmplitude = 880,
-            OceanBandMinWorld = span * 0.056,
-            OceanBandVariationWorld = span * 0.05,
+            OceanBandMinWorld = span * 0.038,
+            OceanBandVariationWorld = span * 0.036,
             OceanDepth = 95,
             TerrainRidgeWeight = 0.18,
             MountainPeakCount = 8,
@@ -62,14 +149,14 @@ public static class BaselinePhysicalWorldGenerator
             HydrologyDesignRainfallM = 0.072,
             HydrologyRunoffFraction = 0.44,
             HydrologyWidthCurveScale = 1.05,
-            RiverChannelHalfWidthMinWorld = span * 0.00055,
             HydrologyMeanderNoise = 0.17,
-            DrainageHeadwaterBudgetFactor = 3.1,
-            DrainageTributaryDensity = 0.92,
+            DrainageHeadwaterBudgetFactor = 2.35,
+            DrainageTributaryDensity = 1.12,
             DrainageMainStemAccumFraction = 0.048,
             DepressionLakeMinDepthM = Math.Max(18, span * 0.000009),
             DepressionLakeMaxCount = 0,
-            CoastalShelfCells = 12,
+            CoastalShelfCells = 8,
+            LandFreshwaterStrictness = request.LandFreshwaterStrictness,
         };
 
         progress?.Report(
@@ -82,35 +169,66 @@ public static class BaselinePhysicalWorldGenerator
         var cells = world.Navigation.Grid?.Cells;
         if (cells is { Count: > 0 })
         {
-            progress?.Report("Normalizing elevation so minimum land height is Z = 0…");
-            var lo = double.MaxValue;
-            var hi = double.MinValue;
+            progress?.Report(
+                "Normalizing elevation (procedural sea surface → world sea level at mid-Z; land versus water depth from water offset)…");
+            var seaWorld = SeaLevelZFromBounds(minZ, maxZ) + GroundLevelAboveSeaLevelM;
+            var zHiClamp = maxZ - 1;
+            var waterZ = request.WaterSurfaceOffsetM;
+
+            var wetZs = new List<double>();
             foreach (var c in cells)
             {
-                lo = Math.Min(lo, c.ElevationZ);
-                lo = Math.Min(lo, c.BedElevationZ);
-                hi = Math.Max(hi, c.ElevationZ);
-                hi = Math.Max(hi, c.BedElevationZ);
+                if (!c.Walkable && c.FluidDepth > 0.01)
+                    wetZs.Add(c.WaterSurfaceZ);
             }
 
-            // Shift so minimum ground is 0; preserve vertical deltas (keeps slope limits from procedural pass).
-            double Map(double z) => Math.Clamp(z - lo, GroundLevelZ, DefaultMaxZ - 1);
+            double zSeaProc;
+            if (wetZs.Count > 0)
+            {
+                wetZs.Sort();
+                zSeaProc = wetZs[wetZs.Count / 2];
+            }
+            else
+            {
+                var lo = double.MaxValue;
+                var hi = double.MinValue;
+                foreach (var c in cells)
+                {
+                    lo = Math.Min(lo, c.ElevationZ);
+                    lo = Math.Min(lo, c.BedElevationZ);
+                    hi = Math.Max(hi, c.ElevationZ);
+                    hi = Math.Max(hi, c.BedElevationZ);
+                }
+
+                zSeaProc = lo <= hi ? (lo + hi) * 0.5 : 0;
+            }
+
+            double Map(double procZ) => Math.Clamp(seaWorld + (procZ - zSeaProc), minZ, zHiClamp);
 
             foreach (var c in cells)
             {
-                c.ElevationZ = Map(c.ElevationZ);
-                c.BedElevationZ = Map(c.BedElevationZ);
-                if (!c.Walkable && c.FluidDepth > 0.01)
-                    c.WaterSurfaceZ = Map(c.WaterSurfaceZ);
+                var wet = !c.Walkable && c.FluidDepth > 0.01;
+                if (wet)
+                {
+                    var surf = Math.Clamp(Map(c.WaterSurfaceZ) + waterZ, minZ, zHiClamp);
+                    var bed = Math.Clamp(Map(c.BedElevationZ) + waterZ, minZ, Math.Min(surf, zHiClamp));
+                    c.WaterSurfaceZ = surf;
+                    c.BedElevationZ = bed;
+                    c.ElevationZ = surf;
+                    c.FluidDepth = Math.Max(0, surf - bed);
+                }
                 else
+                {
+                    var e = Map(c.ElevationZ);
+                    c.ElevationZ = e;
+                    c.BedElevationZ = e;
                     c.WaterSurfaceZ = 0;
-                c.FluidDepth = !c.Walkable && c.FluidDepth > 0.01
-                    ? Math.Max(0, c.WaterSurfaceZ - c.BedElevationZ)
-                    : 0;
+                    c.FluidDepth = 0;
+                }
             }
 
             foreach (var f in world.Features)
-                AffineMapFeatureZ(f, Map);
+                AffineMapFeatureZ(f, Map, minZ, maxZ, waterZ);
 
             progress?.Report("Vegetation overlay (density, community, strata from terrain & hydrology)…");
             NavGridVegetationOverlay.Apply(world.Navigation.Grid, rng);
@@ -118,8 +236,9 @@ public static class BaselinePhysicalWorldGenerator
 
         var regionCount = rng.Next(4, 13);
         world.RegionBoundaries.Clear();
-        progress?.Report($"Building Voronoi lore regions ({regionCount} seeds, water as barriers) — this step scans the full nav grid…");
-        BuildVoronoiRegionsFromTerrain(world, regionCount, rng);
+        progress?.Report(
+            $"Building Voronoi lore regions ({regionCount} seeds; water, ridge corridors, dense forest are barriers) — this step scans the full nav grid…");
+        BuildVoronoiRegionsFromTerrain(world, regionCount, rng, minZ, maxZ);
         progress?.Report($"Lore regions: {world.RegionBoundaries.Count}.");
 
         world.Territories.Clear();
@@ -148,7 +267,10 @@ public static class BaselinePhysicalWorldGenerator
         }
 
         progress?.Report("Adding baseline features (paths, vegetation, ridge overlays, plateaus)…");
-        AddBaselineFeatures(world, rng, progress);
+        AddBaselineFeatures(world, rng, progress, minZ, maxZ);
+
+        world.GlobalBounds.Min = new Vec3 { X = minX, Y = minY, Z = minZ };
+        world.GlobalBounds.Max = new Vec3 { X = maxX, Y = maxY, Z = maxZ };
 
         report.Messages.Insert(0,
             $"Baseline world seed={masterSeed}, regions={world.RegionBoundaries.Count}, territories={world.Territories.Count}, features={world.Features.Count}, cell={cell:F0}; nav cells carry vegetation density/community/strata overlay.");
@@ -157,44 +279,45 @@ public static class BaselinePhysicalWorldGenerator
         return new PhysicalWorldGenerationResult { World = world, Report = report };
     }
 
-    private static void AffineMapFeatureZ(PhysicalTerrainFeature f, Func<double, double> map)
+    private static void AffineMapFeatureZ(PhysicalTerrainFeature f, Func<double, double> map, double zMin, double zMax,
+        double waterSurfaceOffsetM)
     {
         switch (f)
         {
             case FlowingWaterFeature fw:
-                fw.WaterSurfaceZ = Math.Clamp(map(fw.WaterSurfaceZ), GroundLevelZ, DefaultMaxZ - 1);
+                fw.WaterSurfaceZ = Math.Clamp(map(fw.WaterSurfaceZ) + waterSurfaceOffsetM, zMin, zMax - 1);
                 break;
             case StandingWaterFeature sw:
-                sw.WaterSurfaceZ = Math.Clamp(map(sw.WaterSurfaceZ), GroundLevelZ, DefaultMaxZ - 1);
+                sw.WaterSurfaceZ = Math.Clamp(map(sw.WaterSurfaceZ) + waterSurfaceOffsetM, zMin, zMax - 1);
                 break;
             case GroundPlateauFeature g:
-                g.ElevationZ = Math.Clamp(map(g.ElevationZ), GroundLevelZ, DefaultMaxZ - 1);
+                g.ElevationZ = Math.Clamp(map(g.ElevationZ), zMin, zMax - 1);
                 break;
             case BuildingFootprintFeature b:
-                b.BaseZ = Math.Clamp(map(b.BaseZ), GroundLevelZ, DefaultMaxZ - 1);
-                b.RoofZ = Math.Clamp(map(b.RoofZ), b.BaseZ, DefaultMaxZ);
+                b.BaseZ = Math.Clamp(map(b.BaseZ), zMin, zMax - 1);
+                b.RoofZ = Math.Clamp(map(b.RoofZ), b.BaseZ, zMax);
                 break;
             case MountainRidgeFeature m:
-                m.BaseElevationZ = Math.Clamp(map(m.BaseElevationZ), GroundLevelZ, DefaultMaxZ - 1);
-                m.PeakElevationZ = Math.Clamp(map(m.PeakElevationZ), m.BaseElevationZ, DefaultMaxZ);
+                m.BaseElevationZ = Math.Clamp(map(m.BaseElevationZ), zMin, zMax - 1);
+                m.PeakElevationZ = Math.Clamp(map(m.PeakElevationZ), m.BaseElevationZ, zMax);
                 break;
             case SolidVolumeFeature s:
                 s.Bounds.Min = new Vec3
                 {
                     X = s.Bounds.Min.X,
                     Y = s.Bounds.Min.Y,
-                    Z = Math.Clamp(map(s.Bounds.Min.Z), GroundLevelZ, DefaultMaxZ),
+                    Z = Math.Clamp(map(s.Bounds.Min.Z), zMin, zMax),
                 };
                 s.Bounds.Max = new Vec3
                 {
                     X = s.Bounds.Max.X,
                     Y = s.Bounds.Max.Y,
-                    Z = Math.Clamp(map(s.Bounds.Max.Z), GroundLevelZ, DefaultMaxZ),
+                    Z = Math.Clamp(map(s.Bounds.Max.Z), zMin, zMax),
                 };
                 break;
             case VegetationVolumeFeature v:
-                v.ZMin = Math.Clamp(map(v.ZMin), GroundLevelZ, DefaultMaxZ - 1);
-                v.ZMax = Math.Clamp(map(v.ZMax), v.ZMin, DefaultMaxZ);
+                v.ZMin = Math.Clamp(map(v.ZMin), zMin, zMax - 1);
+                v.ZMax = Math.Clamp(map(v.ZMax), v.ZMin, zMax);
                 break;
         }
     }
@@ -207,11 +330,93 @@ public static class BaselinePhysicalWorldGenerator
             Vertices = b.Vertices.Select(v => new GeoVec2 { X = v.X, Y = v.Y }).ToList(),
         };
 
+    /// <summary>Minimum vegetation density (0…1) for a walkable cell to act as a dense-forest Voronoi barrier.</summary>
+    private const double LoreRegionDeepForestDensityMin = 0.56;
+
+    private static bool IsDenseForestLoreBarrier(NavCellDefinition cell) =>
+        cell.Walkable
+        && cell.Composition != SurfaceComposition.Water
+        && cell.VegetationDensity01 >= LoreRegionDeepForestDensityMin
+        && (((int)cell.VegetationStrata & (int)VegetationStratum.Tree) != 0
+            || cell.Composition == SurfaceComposition.ForestFloor);
+
+    private static bool IsLoreVoronoiBarrierCell(NavCellDefinition cell, bool[,] ridgeMask, int i, int j)
+    {
+        if (!cell.Walkable || cell.Composition == SurfaceComposition.Water)
+            return true;
+        if (ridgeMask[i, j])
+            return true;
+        return IsDenseForestLoreBarrier(cell);
+    }
+
+    private static double LoreSegmentDistSq(double px, double py, double ax, double ay, double bx, double by)
+    {
+        var abx = bx - ax;
+        var aby = by - ay;
+        var apx = px - ax;
+        var apy = py - ay;
+        var abLenSq = abx * abx + aby * aby;
+        if (abLenSq < 1e-12)
+            return apx * apx + apy * apy;
+        var t = Math.Clamp((apx * abx + apy * aby) / abLenSq, 0, 1);
+        var qx = ax + t * abx;
+        var qy = ay + t * aby;
+        var dx = px - qx;
+        var dy = py - qy;
+        return dx * dx + dy * dy;
+    }
+
+    private static void StampLoreRidgeSegmentBarrier(bool[,] mask, int cols, int rows, double cs, double ox, double oy,
+        double ax, double ay, double bx, double by, double halfWidth)
+    {
+        var hw = halfWidth + cs;
+        var minX = Math.Min(ax, bx) - hw;
+        var maxX = Math.Max(ax, bx) + hw;
+        var minY = Math.Min(ay, by) - hw;
+        var maxY = Math.Max(ay, by) + hw;
+        var ic0 = Math.Clamp((int)Math.Floor((minX - ox) / cs), 0, cols - 1);
+        var ic1 = Math.Clamp((int)Math.Ceiling((maxX - ox) / cs) - 1, 0, cols - 1);
+        var jr0 = Math.Clamp((int)Math.Floor((minY - oy) / cs), 0, rows - 1);
+        var jr1 = Math.Clamp((int)Math.Ceiling((maxY - oy) / cs) - 1, 0, rows - 1);
+        var w2 = halfWidth * halfWidth;
+        for (var j = jr0; j <= jr1; j++)
+        {
+            var wy = oy + (j + 0.5) * cs;
+            for (var i = ic0; i <= ic1; i++)
+            {
+                var wx = ox + (i + 0.5) * cs;
+                if (LoreSegmentDistSq(wx, wy, ax, ay, bx, by) <= w2)
+                    mask[i, j] = true;
+            }
+        }
+    }
+
+    private static bool[,] BuildRidgeCorridorBarrierMask(PhysicalWorldDefinition world, int cols, int rows, double cs,
+        double ox, double oy)
+    {
+        var mask = new bool[cols, rows];
+        foreach (var f in world.Features)
+        {
+            if (f is not MountainRidgeFeature mr || mr.RidgeLine.Count < 2)
+                continue;
+            var half = Math.Max(cs * 2.0, mr.CorridorHalfWidth);
+            for (var k = 0; k < mr.RidgeLine.Count - 1; k++)
+            {
+                var a = mr.RidgeLine[k];
+                var b = mr.RidgeLine[k + 1];
+                StampLoreRidgeSegmentBarrier(mask, cols, rows, cs, ox, oy, a.X, a.Y, b.X, b.Y, half);
+            }
+        }
+
+        return mask;
+    }
+
     /// <summary>
-    /// Lore regions with organic boundaries (Voronoi on the nav grid). Water is treated as a barrier id so
-    /// shorelines and map edges can bound regions; seeds are placed on walkable land.
+    /// Lore regions with organic boundaries (Voronoi on the nav grid). Water, mountain-ridge corridors, and
+    /// dense forest act as barrier ids; seeds are placed on open walkable land.
     /// </summary>
-    private static void BuildVoronoiRegionsFromTerrain(PhysicalWorldDefinition world, int regionCount, Random rng)
+    private static void BuildVoronoiRegionsFromTerrain(PhysicalWorldDefinition world, int regionCount, Random rng,
+        double zMin, double zMax)
     {
         var grid = world.Navigation.Grid;
         if (grid is null || grid.Columns < 4 || grid.Rows < 4 || grid.Cells is null)
@@ -224,7 +429,8 @@ public static class BaselinePhysicalWorldGenerator
         var oy = grid.OriginY;
         var cells = grid.Cells;
 
-        var seeds = PickLandVoronoiSeeds(grid, regionCount, rng);
+        var ridgeMask = BuildRidgeCorridorBarrierMask(world, cols, rows, cs, ox, oy);
+        var seeds = PickLandVoronoiSeeds(grid, regionCount, rng, ridgeMask);
         if (seeds.Count == 0)
             return;
 
@@ -238,7 +444,7 @@ public static class BaselinePhysicalWorldGenerator
                 for (var i = 0; i < cols; i++)
                 {
                     var cell = cells[j * cols + i];
-                    if (!cell.Walkable || cell.Composition == SurfaceComposition.Water)
+                    if (IsLoreVoronoiBarrierCell(cell, ridgeMask, i, j))
                         owner[j * cols + i] = barrierId;
                     else
                     {
@@ -270,7 +476,7 @@ public static class BaselinePhysicalWorldGenerator
                 for (var i = 0; i < cols; i++)
                 {
                     var cell = cells[j * cols + i];
-                    if (!cell.Walkable || cell.Composition == SurfaceComposition.Water)
+                    if (IsLoreVoronoiBarrierCell(cell, ridgeMask, i, j))
                         owner[j * cols + i] = barrierId;
                     else
                     {
@@ -306,15 +512,16 @@ public static class BaselinePhysicalWorldGenerator
                 LoreRegionId = $"region.baseline_{rid:000}",
                 Boundary = new PolygonColumnBounds
                 {
-                    ZMin = GroundLevelZ,
-                    ZMax = DefaultMaxZ,
+                    ZMin = zMin,
+                    ZMax = zMax,
                     Vertices = poly,
                 },
             });
         }
     }
 
-    private static List<GeoVec2> PickLandVoronoiSeeds(TerrainNavGridDefinition grid, int k, Random rng)
+    private static List<GeoVec2> PickLandVoronoiSeeds(TerrainNavGridDefinition grid, int k, Random rng,
+        bool[,] ridgeMask)
     {
         var cols = grid.Columns;
         var rows = grid.Rows;
@@ -331,8 +538,11 @@ public static class BaselinePhysicalWorldGenerator
             for (var c = 1; c < cols - 1; c++)
             {
                 var cell = cells[r * cols + c];
-                if (cell.Walkable && cell.Composition != SurfaceComposition.Water)
-                    candidates.Add((c, r));
+                if (!cell.Walkable || cell.Composition == SurfaceComposition.Water)
+                    continue;
+                if (ridgeMask[c, r] || IsDenseForestLoreBarrier(cell))
+                    continue;
+                candidates.Add((c, r));
             }
         }
 
@@ -466,7 +676,8 @@ public static class BaselinePhysicalWorldGenerator
         return poly.Count >= 3 ? poly : [];
     }
 
-    private static void AddBaselineFeatures(PhysicalWorldDefinition world, Random rng, IProgress<string>? progress = null)
+    private static void AddBaselineFeatures(PhysicalWorldDefinition world, Random rng, IProgress<string>? progress,
+        double zMin, double zMax)
     {
         var grid = world.Navigation.Grid;
         if (grid is null || grid.Columns < 4 || grid.Rows < 4 || grid.Cells is null)
@@ -479,6 +690,12 @@ public static class BaselinePhysicalWorldGenerator
         var oy = grid.OriginY;
         var cells = grid.Cells;
         var maxStep = Math.Max(200, cs * 0.06);
+
+        var wxLo = ox;
+        var wxHi = ox + cols * cs;
+        var wyLo = oy;
+        var wyHi = oy + rows * cs;
+        var spanXY = Math.Max(cs, Math.Min(wxHi - wxLo, wyHi - wyLo));
 
         var pathCount = rng.Next(4, 11);
         progress?.Report($"  • Path corridors: generating up to {pathCount} gradual walks on the grid…");
@@ -502,9 +719,9 @@ public static class BaselinePhysicalWorldGenerator
         progress?.Report($"  • Vegetation volumes: placing {vegCount} organic regions…");
         for (var v = 0; v < vegCount; v++)
         {
-            var cx = rng.NextDouble() * DefaultExtentXy;
-            var cy = rng.NextDouble() * DefaultExtentXy;
-            var radius = 2500 + rng.NextDouble() * 9000;
+            var cx = wxLo + rng.NextDouble() * (wxHi - wxLo);
+            var cy = wyLo + rng.NextDouble() * (wyHi - wyLo);
+            var radius = Math.Clamp(2500 + rng.NextDouble() * 9000, cs * 12, spanXY * 0.12);
             var z = SampleCellElevation(grid, cx, cy);
             if (z is null)
                 continue;
@@ -521,10 +738,10 @@ public static class BaselinePhysicalWorldGenerator
             }
 
             var zBase = z.Value;
-            var zHi = Math.Min(DefaultMaxZ - 1, zBase + 45 + rng.NextDouble() * 80);
-            var zLo = Math.Max(GroundLevelZ, zBase - 15);
+            var zHi = Math.Min(zMax - 1, zBase + 45 + rng.NextDouble() * 80);
+            var zLo = Math.Max(zMin, zBase - 15);
             if (zHi <= zLo)
-                zHi = Math.Min(DefaultMaxZ - 1, zLo + 25);
+                zHi = Math.Min(zMax - 1, zLo + 25);
             world.Features.Add(new VegetationVolumeFeature
             {
                 Id = $"feat.baseline.veg_{v:000}",
@@ -544,26 +761,26 @@ public static class BaselinePhysicalWorldGenerator
             var line = RidgeWalkHighGround(cols, rows, cells, ox, oy, cs, rng, 14, 48);
             if (line.Count < 2)
                 continue;
-            double minZ = double.MaxValue, maxZ = double.MinValue;
+            double minZE = double.MaxValue, maxZE = double.MinValue;
             foreach (var p in line)
             {
                 var z = SampleCellElevation(grid, p.X, p.Y);
                 if (z is null)
                     continue;
-                minZ = Math.Min(minZ, z.Value);
-                maxZ = Math.Max(maxZ, z.Value);
+                minZE = Math.Min(minZE, z.Value);
+                maxZE = Math.Max(maxZE, z.Value);
             }
 
-            if (minZ > maxZ)
+            if (minZE > maxZE)
                 continue;
-            var peak = Math.Min(DefaultMaxZ - 1, maxZ + 140 + rng.NextDouble() * 320);
+            var peak = Math.Min(zMax - 1, maxZE + 140 + rng.NextDouble() * 320);
             world.Features.Add(new MountainRidgeFeature
             {
                 Id = $"feat.baseline.ridge_{mr:000}",
                 LayerPriority = 2,
                 RidgeLine = line,
-                CorridorHalfWidth = Math.Max(cs * 1.1, 2200),
-                BaseElevationZ = minZ,
+                CorridorHalfWidth = Math.Max(cs * 1.1, Math.Min(2200, spanXY * 0.05)),
+                BaseElevationZ = minZE,
                 PeakElevationZ = peak,
                 SurfaceComposition = SurfaceComposition.Rock,
             });
@@ -573,9 +790,9 @@ public static class BaselinePhysicalWorldGenerator
         progress?.Report($"  • Ground plateaus: {plateauCount} rectangular lifts…");
         for (var pl = 0; pl < plateauCount; pl++)
         {
-            var cx = rng.NextDouble() * DefaultExtentXy;
-            var cy = rng.NextDouble() * DefaultExtentXy;
-            var half = 1800 + rng.NextDouble() * 4000;
+            var cx = wxLo + rng.NextDouble() * (wxHi - wxLo);
+            var cy = wyLo + rng.NextDouble() * (wyHi - wyLo);
+            var half = Math.Clamp(1800 + rng.NextDouble() * 4000, cs * 6, spanXY * 0.25);
             var z0 = SampleCellElevation(grid, cx, cy);
             if (z0 is null)
                 continue;
@@ -591,7 +808,7 @@ public static class BaselinePhysicalWorldGenerator
                     new GeoVec2 { X = cx + half, Y = cy + half },
                     new GeoVec2 { X = cx - half, Y = cy + half },
                 ],
-                ElevationZ = Math.Min(z0.Value + bump, DefaultMaxZ - 1),
+                ElevationZ = Math.Min(z0.Value + bump, zMax - 1),
                 Composition = SurfaceComposition.Grass,
             });
         }

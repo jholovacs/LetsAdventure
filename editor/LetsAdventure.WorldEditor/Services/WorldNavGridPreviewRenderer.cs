@@ -55,6 +55,65 @@ public static class WorldNavGridPreviewRenderer
         return true;
     }
 
+    /// <summary>
+    /// Horizontal / vertical preview pixels per world meter so vector overlays align with the nav raster
+    /// (<paramref name="rasterCellPixels"/> per raster pixel; full grid or chunked preview.png).
+    /// </summary>
+    public static bool TryGetMapPreviewPixelsPerWorldMeter(
+        PhysicalWorldDefinition world,
+        double rasterCellPixels,
+        string? chunkStoreDirectory,
+        out double pixelsPerWorldMeterX,
+        out double pixelsPerWorldMeterY)
+    {
+        pixelsPerWorldMeterX = 0;
+        pixelsPerWorldMeterY = 0;
+        var grid = world.Navigation.Grid;
+        if (grid is null || grid.CellSize <= 1e-9 || grid.Columns < 1 || grid.Rows < 1)
+            return false;
+
+        var cols = grid.Columns;
+        var rows = grid.Rows;
+        var cs = grid.CellSize;
+        rasterCellPixels = Math.Max(1e-6, rasterCellPixels);
+
+        if (grid.Cells is not null && grid.Cells.Count >= (long)cols * rows)
+        {
+            var s = rasterCellPixels / cs;
+            pixelsPerWorldMeterX = s;
+            pixelsPerWorldMeterY = s;
+            return true;
+        }
+
+        if (string.IsNullOrEmpty(chunkStoreDirectory))
+            return false;
+        if (!NavGridChunkIO.TryLoadManifest(chunkStoreDirectory, out var manifest) || manifest is null)
+            return false;
+        var pngPath = Path.Combine(chunkStoreDirectory, manifest.PreviewPngFile);
+        if (!File.Exists(pngPath))
+            return false;
+
+        int iw, ih;
+        try
+        {
+            using var stream = File.OpenRead(pngPath);
+            var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
+            var frame = decoder.Frames[0];
+            iw = frame.PixelWidth;
+            ih = frame.PixelHeight;
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (iw < 1 || ih < 1)
+            return false;
+        pixelsPerWorldMeterX = iw * rasterCellPixels / (cols * cs);
+        pixelsPerWorldMeterY = ih * rasterCellPixels / (rows * cs);
+        return pixelsPerWorldMeterX > 0 && pixelsPerWorldMeterY > 0;
+    }
+
     /// <summary>Loads <paramref name="chunkStoreDirectory"/>/preview.png (or manifest name) when cells are external.</summary>
     public static Image? TryBuildNavGridImage(
         PhysicalWorldDefinition world,

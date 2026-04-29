@@ -11,6 +11,16 @@ namespace LetsAdventure.Core.World;
 /// </summary>
 public static partial class ProceduralPhysicalWorldGenerator
 {
+    /// <summary>
+    /// River half-width (m) is also limited to <c>cell × this</c> so coarse high-res grids do not paint huge channels.
+    /// </summary>
+    private const double RiverCorridorHalfWidthCapCellMultiple = 5.5;
+
+    /// <summary>
+    /// Hard cap on channel half-width (m). Most natural rivers are ~10–50 m half (~20–100 m across); only a few exceed that.
+    /// </summary>
+    private const double RiverCorridorHalfWidthAbsoluteMaxM = 52;
+
     private sealed record DrainageField(double[,] ContributingAreaM2, int[,] DownC, int[,] DownR);
 
     /// <summary>D8 flow has no steeper neighbor (sink / flat).</summary>
@@ -29,7 +39,7 @@ public static partial class ProceduralPhysicalWorldGenerator
 
     private static bool ShouldParallelize(int cols, int rows) => (long)cols * rows >= ParallelGridCellThreshold;
 
-    private static bool ExpectLongRunningGridPhase(int cols, int rows) =>
+    internal static bool ExpectLongRunningGridPhase(int cols, int rows) =>
         (long)cols * rows >= LongRunningGridCellThreshold;
 
     /// <summary>Parallel over column index; inner loop is row (matches most <c>h[c,r]</c> passes).</summary>
@@ -77,7 +87,7 @@ public static partial class ProceduralPhysicalWorldGenerator
     public static PhysicalWorldGenerationResult Generate(ProceduralWorldSpec spec, IProgress<string>? progress = null) =>
         GenerateCoastalOceanDrainage(spec, progress);
 
-    private static void Report(IProgress<string>? progress, string message) => progress?.Report(message);
+    internal static void Report(IProgress<string>? progress, string message) => progress?.Report(message);
 
     private static PhysicalWorldGenerationResult GenerateCoastalOceanDrainage(ProceduralWorldSpec spec,
         IProgress<string>? progress)
@@ -207,16 +217,12 @@ public static partial class ProceduralPhysicalWorldGenerator
         EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 24, progress,
             "[coastal] Land-only slope before river valleys");
         var landNearRiver = new bool[cols, rows];
-        var valleyScratch = new bool[cols, rows];
         var stemTotal = riverPaths.Count;
         for (var si = 0; si < stemTotal; si++)
         {
             var path = riverPaths[si];
-            ApplyRiverValleyLandBias(h, isWater, path, cols, rows, spec, valleyScratch, progress,
+            ApplyRiverValleyLandBias(h, isWater, path, cols, rows, spec, landNearRiver, progress,
                 $"[coastal] River valley bias stem {si + 1}/{stemTotal}");
-            for (var c = 0; c < cols; c++)
-                for (var r = 0; r < rows; r++)
-                    landNearRiver[c, r] |= valleyScratch[c, r];
         }
 
         EnforceLandOnlySlope(h, isWater, cols, rows, spec.MaxLandStepOrthogonal, 18, progress,
@@ -255,7 +261,7 @@ public static partial class ProceduralPhysicalWorldGenerator
         {
             SchemaVersion = 1,
             CoordinateDescription =
-                "X/Y horizontal plane, Z vertical (up). 1 unit = 1 m (SI). Procedurally generated (coastal ocean).",
+                "X/Y horizontal plane, Z vertical (up). 1 unit = 1 m (SI). Sea level = (MinZ+MaxZ)/2 in world Z; terrain and water surfaces are heights relative to that. Procedurally generated (coastal ocean).",
             GlobalBounds = new AxisAlignedBounds
             {
                 Min = new Vec3 { X = spec.MinX, Y = spec.MinY, Z = spec.MinZBound },

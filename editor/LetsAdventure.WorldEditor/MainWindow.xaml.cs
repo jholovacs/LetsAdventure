@@ -1,8 +1,9 @@
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -22,8 +23,6 @@ public partial class MainWindow : Window
     private PhysicalWorldDefinition _world = WorldDocumentService.CreateNew();
     private string? _filePath;
     private bool _dirty;
-    private readonly ObservableCollection<NavNodeRow> _navNodes = [];
-    private readonly ObservableCollection<NavEdgeRow> _navEdges = [];
 
     private bool _scene3DStale = true;
     private Vec3 _3dFocusWorld;
@@ -59,8 +58,6 @@ public partial class MainWindow : Window
             _navChunkSource?.Dispose();
             _navChunkSource = null;
         };
-        GridNavNodes.ItemsSource = _navNodes;
-        GridNavEdges.ItemsSource = _navEdges;
         CmbFeatureKind.ItemsSource = new[]
         {
             "ground_plateau", "path", "mountain_ridge", "water_standing", "water_flowing",
@@ -100,14 +97,7 @@ public partial class MainWindow : Window
         LstTerritories.ItemsSource = _world.Territories;
         LstFeatures.ItemsSource = _world.Features;
 
-        var g = _world.Navigation.Grid ??= new TerrainNavGridDefinition();
-        TxtGridOriginX.Text = g.OriginX.ToString();
-        TxtGridOriginY.Text = g.OriginY.ToString();
-        TxtGridCellSize.Text = g.CellSize.ToString();
-        TxtGridColumns.Text = g.Columns.ToString();
-        TxtGridRows.Text = g.Rows.ToString();
-
-        NavRowSync.LoadGraph(_world.Navigation.Graph, _navNodes, _navEdges);
+        _ = _world.Navigation.Grid ??= new TerrainNavGridDefinition();
         SyncNavGridChunkAccess();
         DrawPreview();
         _scene3DStale = true;
@@ -133,6 +123,9 @@ public partial class MainWindow : Window
         if (grid is null || grid.Columns < 1 || grid.Rows < 1)
             return;
 
+        if (grid.Cells is { Count: var populated } && populated >= (long)grid.Columns * grid.Rows)
+            return;
+
         string? dir = null;
         if (!string.IsNullOrEmpty(grid.NavGridChunkSessionDirectoryAbsolute))
             dir = System.IO.Path.GetFullPath(grid.NavGridChunkSessionDirectoryAbsolute);
@@ -151,6 +144,47 @@ public partial class MainWindow : Window
             return;
         _navChunkStoreDirectoryAbsolute = dir;
         _world.NavGridCellSource = _navChunkSource;
+    }
+
+    private string? ResolveNavChunkStoreDirectory()
+    {
+        var grid = _world.Navigation.Grid;
+        if (grid is null)
+            return null;
+        if (!string.IsNullOrEmpty(_navChunkStoreDirectoryAbsolute) &&
+            Directory.Exists(_navChunkStoreDirectoryAbsolute))
+            return _navChunkStoreDirectoryAbsolute;
+        if (!string.IsNullOrEmpty(grid.NavGridChunkSessionDirectoryAbsolute))
+        {
+            var d = System.IO.Path.GetFullPath(grid.NavGridChunkSessionDirectoryAbsolute);
+            if (Directory.Exists(d))
+                return d;
+        }
+
+        if (!string.IsNullOrEmpty(grid.NavGridChunkStoreRelativePath) && !string.IsNullOrEmpty(_filePath))
+        {
+            var baseDir = System.IO.Path.GetDirectoryName(_filePath);
+            if (!string.IsNullOrEmpty(baseDir))
+            {
+                var d = System.IO.Path.GetFullPath(System.IO.Path.Combine(baseDir, grid.NavGridChunkStoreRelativePath));
+                if (Directory.Exists(d))
+                    return d;
+            }
+        }
+
+        return null;
+    }
+
+    private void PreloadNavGridChunksFor3DView()
+    {
+        if (_world.NavGridCellSource is not NavGridChunkCellSource src)
+            return;
+        var chunkHalf = Sld3DChunkDetailHalf is not null
+            ? (int)Math.Clamp(Math.Round(Sld3DChunkDetailHalf.Value), 0, 512)
+            : 72;
+        var cw = Math.Max(1, src.Manifest.ChunkWidthCells);
+        var radius = Math.Clamp(chunkHalf / cw + 3, 2, 18);
+        src.PreloadChunksAroundWorldXY(_3dFocusWorld.X, _3dFocusWorld.Y, radius);
     }
 
     private static void CopyDirectoryRecursive(string sourceDir, string targetDir)
@@ -191,11 +225,13 @@ public partial class MainWindow : Window
         _world = WorldDocumentService.CreateNew();
         _filePath = null;
         RefreshUiFromWorld();
+        TxtWaterSurfaceOffset.Text = new BaselineGenerationRequest().WaterSurfaceOffsetM.ToString(CultureInfo.InvariantCulture);
+        TxtLandFreshwaterCoveragePct.Text = "100";
         ClearDirty();
         UpdateStatus();
     }
 
-    private void GenerateWorld_Click(object sender, RoutedEventArgs e)
+    private async void GenerateWorld_Click(object sender, RoutedEventArgs e)
     {
         if (!WarnDiscardUnsaved())
             return;
@@ -203,7 +239,18 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog() != true || dlg.ResultSpec is null)
             return;
 
-        var result = ProceduralPhysicalWorldGenerator.Generate(dlg.ResultSpec);
+        var spec = dlg.ResultSpec;
+        PhysicalWorldGenerationResult result;
+        try
+        {
+            result = await Task.Run(() => ProceduralPhysicalWorldGenerator.Generate(spec)).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Procedural world", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
         _world = result.World;
         _filePath = null;
         RefreshUiFromWorld();
@@ -219,7 +266,7 @@ public partial class MainWindow : Window
 
         lines.AddRange(r.Messages);
         lines.Add(
-            $"Max land orth. slope: {r.MaxObservedLandOrthogonalSlope:F2} (limit {dlg.ResultSpec.MaxLandStepOrthogonal:F2}); violation edges: {r.LandSlopeViolationCount}.");
+            $"Max land orth. slope: {r.MaxObservedLandOrthogonalSlope:F2} (limit {spec.MaxLandStepOrthogonal:F2}); violation edges: {r.LandSlopeViolationCount}.");
         lines.Add(
             $"Hydrology strict pass: {r.RiverTerminatesInLakeRegion}; river→ocean connectivity: {r.AllFlowingCellsReachStandingWater} (river cells failing: {r.WaterConnectivityFailures}).");
         lines.Add(
@@ -233,10 +280,83 @@ public partial class MainWindow : Window
             r.IsSufficientlyNavigable ? MessageBoxImage.Information : MessageBoxImage.Warning);
     }
 
-    private async void BaselineWorld_Click(object sender, RoutedEventArgs e)
+    private static bool TryParseBaselineRequestFromUi(
+        string minXt, string minYt, string minZt, string maxXt, string maxYt, string maxZt, string waterOffsetText,
+        string landFreshwaterPctText,
+        out BaselineGenerationRequest request, out string error)
+    {
+        request = default!;
+        if (!double.TryParse(minXt, NumberStyles.Float, CultureInfo.InvariantCulture, out var minX)
+            || !double.TryParse(minYt, NumberStyles.Float, CultureInfo.InvariantCulture, out var minY)
+            || !double.TryParse(minZt, NumberStyles.Float, CultureInfo.InvariantCulture, out var minZ)
+            || !double.TryParse(maxXt, NumberStyles.Float, CultureInfo.InvariantCulture, out var maxX)
+            || !double.TryParse(maxYt, NumberStyles.Float, CultureInfo.InvariantCulture, out var maxY)
+            || !double.TryParse(maxZt, NumberStyles.Float, CultureInfo.InvariantCulture, out var maxZ))
+        {
+            error = "Enter valid numbers for all min/max X, Y, and Z bounds.";
+            return false;
+        }
+
+        if (!double.TryParse(waterOffsetText.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var waterOffset)
+            || !double.IsFinite(waterOffset))
+        {
+            error = "Enter a valid finite number for water offset (m).";
+            return false;
+        }
+
+        if (!double.TryParse(landFreshwaterPctText.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var rawPct)
+            || !double.IsFinite(rawPct)
+            || rawPct <= 0)
+        {
+            error = "Enter a positive number for land freshwater (%).";
+            return false;
+        }
+
+        var pctClamped = Math.Clamp(rawPct, 2.5, 500.0);
+        var strictness = 100.0 / pctClamped;
+
+        request = new BaselineGenerationRequest
+        {
+            Seed = null,
+            MinX = minX,
+            MinY = minY,
+            MinZ = minZ,
+            MaxX = maxX,
+            MaxY = maxY,
+            MaxZ = maxZ,
+            WaterSurfaceOffsetM = waterOffset,
+            LandFreshwaterStrictness = strictness,
+        };
+
+        try
+        {
+            request.Validate();
+        }
+        catch (ArgumentException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+
+        error = "";
+        return true;
+    }
+
+    private async void MetadataGenerateBaseline_Click(object sender, RoutedEventArgs e)
     {
         if (!WarnDiscardUnsaved())
             return;
+
+        if (!TryParseBaselineRequestFromUi(
+                TxtMinX.Text, TxtMinY.Text, TxtMinZ.Text, TxtMaxX.Text, TxtMaxY.Text, TxtMaxZ.Text,
+                TxtWaterSurfaceOffset.Text,
+                TxtLandFreshwaterCoveragePct.Text,
+                out var request,
+                out var parseErr))
+        {
+            MessageBox.Show(this, parseErr, "Baseline map", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
 
         var logWindow = new BaselineBuildProgressWindow { Owner = this };
         var baselineSucceeded = false;
@@ -244,72 +364,50 @@ public partial class MainWindow : Window
         {
             if (!baselineSucceeded)
                 return;
-            MainTabs.SelectedItem = Scene3DTab;
+            // Let the progress window finish tearing down before tab change + 3D work. Background/Normal
+            // still run in the same "storm" as Close; ApplicationIdle yields until input/layout settle.
+            _ = Dispatcher.BeginInvoke(() => { MainTabs.SelectedItem = Scene3DTab; },
+                DispatcherPriority.ApplicationIdle);
         };
         logWindow.Show();
         logWindow.SetBusy(true);
         IProgress<string> progress = new Progress<string>(logWindow.AppendLine);
         try
         {
-            var result = await System.Threading.Tasks.Task.Run(() => BaselinePhysicalWorldGenerator.Generate(null, progress))
+            var result = await System.Threading.Tasks.Task.Run(() => BaselinePhysicalWorldGenerator.Generate(request, progress))
                 .ConfigureAwait(true);
 
             _world = result.World;
             _filePath = null;
-            var grid = _world.Navigation.Grid;
-            if (grid?.Cells is { Count: > 0 })
+
+            var baselineDir = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "LetsAdventure", "WorldEditor", "baseline-output");
+            var baselineJson = System.IO.Path.Combine(baselineDir, "physical_world.json");
+            progress.Report("Saving baseline to disk (required before continuing)…");
+            try
             {
-                var sessionDir = System.IO.Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "LetsAdventure", "WorldEditor", "navgrid-session");
-                try
-                {
-                    Directory.CreateDirectory(sessionDir);
-                    foreach (var f in Directory.GetFiles(sessionDir))
-                    {
-                        try
-                        {
-                            File.Delete(f);
-                        }
-                        catch
-                        {
-                            /* best effort */
-                        }
-                    }
-
-                    foreach (var d in Directory.GetDirectories(sessionDir))
-                    {
-                        try
-                        {
-                            Directory.Delete(d, true);
-                        }
-                        catch
-                        {
-                            /* best effort */
-                        }
-                    }
-
-                    NavGridChunkIO.ExportToDirectory(grid, sessionDir, progress: progress);
-                    WorldNavGridPreviewRenderer.TryWriteOverviewPng(grid, System.IO.Path.Combine(sessionDir, "preview.png"));
-                    grid.Cells = null;
-                    grid.NavGridChunkStoreRelativePath = null;
-                    grid.NavGridChunkSessionDirectoryAbsolute = sessionDir;
-                    progress.Report(
-                        $"Nav grid written to chunk store for editing ({sessionDir}). 3D terrain uses one quad per chunk; Save to copy chunks beside your JSON.");
-                }
-                catch (Exception ex)
-                {
-                    progress.Report($"Warning: chunk export failed (keeping full grid in RAM): {ex.Message}");
-                }
+                if (!SaveWorldToPathCore(baselineJson, progress))
+                    throw new InvalidOperationException("Baseline save path is invalid.");
+            }
+            catch (Exception ex)
+            {
+                logWindow.AppendLine("");
+                logWindow.AppendLine("Failed to save baseline to disk: " + ex.Message);
+                logWindow.NotifyComplete();
+                return;
             }
 
-            RefreshUiFromWorld();
-            MarkDirty();
+            progress.Report($"Baseline saved: {baselineJson}");
+            ClearDirty();
             UpdateStatus();
 
+            RefreshUiFromWorld();
+
             logWindow.AppendLine("");
+            logWindow.AppendLine($"Saved to: {baselineJson}");
             logWindow.AppendLine(
-                $"Extent XY {BaselinePhysicalWorldGenerator.DefaultExtentXy:F0}, Z [{BaselinePhysicalWorldGenerator.GroundLevelZ} … {BaselinePhysicalWorldGenerator.DefaultMaxZ}].");
+                $"Bounds X [{request.MinX:F0} … {request.MaxX:F0}], Y [{request.MinY:F0} … {request.MaxY:F0}], Z [{request.MinZ:F0} … {request.MaxZ:F0}].");
             logWindow.AppendLine(
                 $"Regions: {_world.RegionBoundaries.Count}, territories: {_world.Territories.Count}, features: {_world.Features.Count}.");
             foreach (var msg in result.Report.Messages)
@@ -318,7 +416,7 @@ public partial class MainWindow : Window
                 ? "Hydrology / slope checks passed."
                 : "Review hydrology / slope warnings above.");
             logWindow.AppendLine(
-                "Closing this window opens the 3D scene tab. WASD pans; LMB orbits; mouse wheel zooms; Shift+wheel changes orbit elevation. Large baselines use coarse chunk terrain in 3D (full detail remains in chunk files).");
+                "Closing this window opens the 3D scene tab. Baseline output is under baseline-output above; use Save As to copy elsewhere. WASD pans; LMB orbits; mouse wheel zooms; Shift+wheel changes orbit elevation.");
             baselineSucceeded = true;
             logWindow.NotifyComplete();
         }
@@ -329,6 +427,8 @@ public partial class MainWindow : Window
             logWindow.NotifyComplete();
         }
     }
+
+    private void LoadMap_Click(object sender, RoutedEventArgs e) => Open_Click(sender, e);
 
     private void Open_Click(object sender, RoutedEventArgs e)
     {
@@ -351,10 +451,60 @@ public partial class MainWindow : Window
 
     private void SaveAs_Click(object sender, RoutedEventArgs e) => SaveInternal(promptPath: true);
 
-    private void SaveInternal(bool promptPath)
+    /// <summary>
+    /// Persists <see cref="_world"/> to <paramref name="path"/> (JSON + <c>.navgrid</c> sidecar when required).
+    /// No dialogs; sets <see cref="_filePath"/> on success.
+    /// </summary>
+    /// <returns>False when the path has no directory component.</returns>
+    private bool SaveWorldToPathCore(string path, IProgress<string>? progress)
     {
         EnsureNavBundle();
-        NavRowSync.SaveGraph(_world.Navigation.Graph!, _navNodes, _navEdges);
+        var dir = System.IO.Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(dir))
+            return false;
+        Directory.CreateDirectory(dir);
+
+        var grid = _world.Navigation.Grid;
+        if (grid is not null)
+        {
+            var baseName = System.IO.Path.GetFileNameWithoutExtension(path);
+            var sidecar = System.IO.Path.Combine(dir, baseName + ".navgrid");
+            if (grid.Cells is { Count: var nc } && nc >= NavGridChunkIO.AutoExportCellThreshold)
+            {
+                progress?.Report($"Writing nav grid chunks to {sidecar}…");
+                NavGridChunkIO.ExportToDirectory(grid, sidecar, progress: progress);
+                WorldNavGridPreviewRenderer.TryWriteOverviewPng(grid, System.IO.Path.Combine(sidecar, "preview.png"));
+                grid.NavGridChunkStoreRelativePath = System.IO.Path.GetFileName(sidecar);
+                grid.NavGridChunkSessionDirectoryAbsolute = null;
+                grid.Cells = null;
+                _navChunkSource?.Dispose();
+                _navChunkSource = NavGridChunkCellSource.TryOpen(sidecar);
+                _navChunkStoreDirectoryAbsolute = sidecar;
+                _world.NavGridCellSource = _navChunkSource;
+            }
+            else if (!string.IsNullOrEmpty(grid.NavGridChunkSessionDirectoryAbsolute))
+            {
+                progress?.Report($"Copying nav grid chunk session to {sidecar}…");
+                Directory.CreateDirectory(sidecar);
+                CopyDirectoryRecursive(grid.NavGridChunkSessionDirectoryAbsolute, sidecar);
+                grid.NavGridChunkStoreRelativePath = System.IO.Path.GetFileName(sidecar);
+                grid.NavGridChunkSessionDirectoryAbsolute = null;
+                _navChunkSource?.Dispose();
+                _navChunkSource = NavGridChunkCellSource.TryOpen(sidecar);
+                _navChunkStoreDirectoryAbsolute = sidecar;
+                _world.NavGridCellSource = _navChunkSource;
+            }
+        }
+
+        progress?.Report($"Writing {path}…");
+        WorldDocumentService.Save(path, _world);
+        _world.NavGridCellSource = _navChunkSource;
+        _filePath = path;
+        return true;
+    }
+
+    private void SaveInternal(bool promptPath)
+    {
         var path = _filePath;
         if (promptPath || string.IsNullOrEmpty(path))
         {
@@ -368,40 +518,8 @@ public partial class MainWindow : Window
             path = dlg.FileName;
         }
 
-        var grid = _world.Navigation.Grid;
-        var dir = System.IO.Path.GetDirectoryName(path);
-        if (grid is not null && !string.IsNullOrEmpty(dir))
-        {
-            var baseName = System.IO.Path.GetFileNameWithoutExtension(path);
-            var sidecar = System.IO.Path.Combine(dir, baseName + ".navgrid");
-            if (grid.Cells is { Count: var nc } && nc >= NavGridChunkIO.AutoExportCellThreshold)
-            {
-                NavGridChunkIO.ExportToDirectory(grid, sidecar);
-                WorldNavGridPreviewRenderer.TryWriteOverviewPng(grid, System.IO.Path.Combine(sidecar, "preview.png"));
-                grid.NavGridChunkStoreRelativePath = System.IO.Path.GetFileName(sidecar);
-                grid.NavGridChunkSessionDirectoryAbsolute = null;
-                grid.Cells = null;
-                _navChunkSource?.Dispose();
-                _navChunkSource = NavGridChunkCellSource.TryOpen(sidecar);
-                _navChunkStoreDirectoryAbsolute = sidecar;
-                _world.NavGridCellSource = _navChunkSource;
-            }
-            else if (!string.IsNullOrEmpty(grid.NavGridChunkSessionDirectoryAbsolute))
-            {
-                Directory.CreateDirectory(sidecar);
-                CopyDirectoryRecursive(grid.NavGridChunkSessionDirectoryAbsolute, sidecar);
-                grid.NavGridChunkStoreRelativePath = System.IO.Path.GetFileName(sidecar);
-                grid.NavGridChunkSessionDirectoryAbsolute = null;
-                _navChunkSource?.Dispose();
-                _navChunkSource = NavGridChunkCellSource.TryOpen(sidecar);
-                _navChunkStoreDirectoryAbsolute = sidecar;
-                _world.NavGridCellSource = _navChunkSource;
-            }
-        }
-
-        WorldDocumentService.Save(path, _world);
-        _world.NavGridCellSource = _navChunkSource;
-        _filePath = path;
+        if (!SaveWorldToPathCore(path, progress: null))
+            return;
         ClearDirty();
         UpdateStatus();
         MessageBox.Show(this, "Saved.", "World Editor", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -535,6 +653,7 @@ public partial class MainWindow : Window
             return;
 
         Pan3DFocusInViewSpace(delta);
+        PreloadNavGridChunksFor3DView();
         Apply3DCameraOnly();
         WorldViewportDx.InvalidateRender();
     }
@@ -833,69 +952,123 @@ public partial class MainWindow : Window
         }
     }
 
-    private void NavNodeAdd_Click(object sender, RoutedEventArgs e)
+    private void NavGridLoadAllFromChunks_Click(object sender, RoutedEventArgs e)
     {
         EnsureNavBundle();
-        _navNodes.Add(new NavNodeRow { Id = "nav.new", Z = 1 });
-        MarkDirty();
-    }
-
-    private void NavNodeRemove_Click(object sender, RoutedEventArgs e)
-    {
-        if (GridNavNodes.SelectedItem is NavNodeRow r)
+        var grid = _world.Navigation.Grid!;
+        var dir = ResolveNavChunkStoreDirectory();
+        if (string.IsNullOrEmpty(dir))
         {
-            _navNodes.Remove(r);
+            MessageBox.Show(this,
+                "No nav grid chunk store found. Save the world (large grids write a .navgrid folder), or generate a baseline so chunks exist beside your session.",
+                "Nav grid", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            if (!NavGridChunkIO.TryLoadManifest(dir, out var m) || m is null)
+            {
+                MessageBox.Show(this, "manifest.json is missing or invalid in the chunk directory.", "Nav grid",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (grid.Columns != m.Columns || grid.Rows != m.Rows
+                || Math.Abs(grid.OriginX - m.OriginX) > 1e-6
+                || Math.Abs(grid.OriginY - m.OriginY) > 1e-6
+                || Math.Abs(grid.CellSize - m.CellSize) > 1e-6)
+            {
+                var r = MessageBox.Show(this,
+                    "Chunk manifest metadata does not match the nav grid fields in this document. Replace grid metadata with manifest values and load all cells?",
+                    "Nav grid", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (r != MessageBoxResult.Yes)
+                    return;
+                grid.Columns = m.Columns;
+                grid.Rows = m.Rows;
+                grid.OriginX = m.OriginX;
+                grid.OriginY = m.OriginY;
+                grid.CellSize = m.CellSize;
+            }
+
+            grid.Cells = NavGridChunkIO.MaterializeCellsFromDirectory(dir);
+            grid.NavGridChunkSessionDirectoryAbsolute = null;
+            _navChunkSource?.Dispose();
+            _navChunkSource = null;
+            _navChunkStoreDirectoryAbsolute = null;
+            _world.NavGridCellSource = null;
+            SyncNavGridChunkAccess();
+            _scene3DStale = true;
+            DrawPreview();
+            if (Equals(MainTabs.SelectedItem, Scene3DTab))
+                RebuildWorld3DScene();
             MarkDirty();
+            MessageBox.Show(this,
+                $"Loaded {grid.Cells.Count} nav cells into memory. Save still writes the full grid to the chunk store when above the export threshold.",
+                "Nav grid", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Nav grid", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
-    private void NavEdgeAdd_Click(object sender, RoutedEventArgs e)
-    {
-        _navEdges.Add(new NavEdgeRow { FromId = "nav.a", ToId = "nav.b" });
-        MarkDirty();
-    }
-
-    private void NavEdgeRemove_Click(object sender, RoutedEventArgs e)
-    {
-        if (GridNavEdges.SelectedItem is NavEdgeRow r)
-        {
-            _navEdges.Remove(r);
-            MarkDirty();
-        }
-    }
-
-    private void NavGridApply_Click(object sender, RoutedEventArgs e)
+    private void NavGridReleaseCellsToChunkStore_Click(object sender, RoutedEventArgs e)
     {
         EnsureNavBundle();
-        var g = _world.Navigation.Grid!;
-        if (double.TryParse(TxtGridOriginX.Text, out var ox))
-            g.OriginX = ox;
-        if (double.TryParse(TxtGridOriginY.Text, out var oy))
-            g.OriginY = oy;
-        if (double.TryParse(TxtGridCellSize.Text, out var cs))
-            g.CellSize = cs;
-        if (int.TryParse(TxtGridColumns.Text, out var c))
-            g.Columns = Math.Max(1, c);
-        if (int.TryParse(TxtGridRows.Text, out var r))
-            g.Rows = Math.Max(1, r);
-        MarkDirty();
-    }
+        var grid = _world.Navigation.Grid!;
+        var dir = ResolveNavChunkStoreDirectory();
+        if (string.IsNullOrEmpty(dir))
+        {
+            MessageBox.Show(this,
+                "No chunk directory on disk. Save the world first to create a .navgrid folder next to the JSON.",
+                "Nav grid", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
 
-    private void GridNav_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e) => MarkDirty();
+        var expected = (long)grid.Columns * grid.Rows;
+        if (grid.Cells is { Count: var n } && n >= expected && n > 0)
+        {
+            try
+            {
+                NavGridChunkIO.ExportToDirectory(grid, dir);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Could not write cells to the chunk store: " + ex.Message, "Nav grid",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+        }
+
+        grid.Cells = null;
+        SyncNavGridChunkAccess();
+        _scene3DStale = true;
+        DrawPreview();
+        if (Equals(MainTabs.SelectedItem, Scene3DTab))
+            RebuildWorld3DScene();
+        MarkDirty();
+        MessageBox.Show(this, "Nav grid is streaming from chunk files again (manifest + binaries on disk).", "Nav grid",
+            MessageBoxButton.OK, MessageBoxImage.Information);
+    }
 
     private void MainTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (Equals(MainTabs.SelectedItem, NavGraphTab))
-        {
-            EnsureNavBundle();
-            NavRowSync.LoadGraph(_world.Navigation.Graph, _navNodes, _navEdges);
-        }
-
         if (Equals(MainTabs.SelectedItem, Scene3DTab))
         {
             Ensure3DFocusInitialized();
+            PreloadNavGridChunksFor3DView();
             if (_scene3DStale)
-                RebuildWorld3DScene();
+            {
+                // Full Helix rebuild can take many seconds; running it synchronously from tab change
+                // (e.g. right after closing the baseline progress window) wedges the UI thread / D3D.
+                _ = Dispatcher.BeginInvoke(() =>
+                {
+                    if (!Equals(MainTabs.SelectedItem, Scene3DTab))
+                        return;
+                    RebuildWorld3DScene();
+                }, DispatcherPriority.ApplicationIdle);
+            }
             else
                 Apply3DCameraOnly();
         }
@@ -971,11 +1144,38 @@ public partial class MainWindow : Window
             return;
         }
 
+        var sv = MapPreviewScrollViewer;
+        if (sv is null)
+            return;
+
+        var p = e.GetPosition(sv);
+        var zoom0 = _mapPreviewZoom;
         var factor = e.Delta > 0 ? 1.12 : 1 / 1.12;
-        _mapPreviewZoom = Math.Clamp(_mapPreviewZoom * factor, 1e-6, 64);
+        var zoom1 = Math.Clamp(zoom0 * factor, 1e-6, 64);
+        if (Math.Abs(zoom1 - zoom0) < 1e-15)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        var worldX = sv.HorizontalOffset + p.X;
+        var worldY = sv.VerticalOffset + p.Y;
+        var ratio = zoom1 / zoom0;
+
+        _mapPreviewZoom = zoom1;
         PreviewCanvas.LayoutTransform = _mapPreviewScaleTransform;
         _mapPreviewScaleTransform.ScaleX = _mapPreviewZoom;
         _mapPreviewScaleTransform.ScaleY = _mapPreviewZoom;
+
+        sv.UpdateLayout();
+        PreviewCanvas.UpdateLayout();
+
+        var nx = worldX * ratio - p.X;
+        var ny = worldY * ratio - p.Y;
+        var maxX = Math.Max(0, sv.ScrollableWidth);
+        var maxY = Math.Max(0, sv.ScrollableHeight);
+        sv.ScrollToHorizontalOffset(Math.Clamp(nx, 0, maxX));
+        sv.ScrollToVerticalOffset(Math.Clamp(ny, 0, maxY));
         e.Handled = true;
     }
 
@@ -1030,27 +1230,52 @@ public partial class MainWindow : Window
         _mapPreviewScaleTransform.ScaleX = _mapPreviewZoom;
         _mapPreviewScaleTransform.ScaleY = _mapPreviewZoom;
 
-        var scale = SldPreviewScale.Value;
-        const double ox = 40;
-        const double oy = 40;
+        const double marginOx = 40;
+        const double marginOy = 40;
+        var cellPx = SldRasterCellPx?.Value ?? 1;
+        var gridForMap = _world.Navigation.Grid;
+        double ppwX = 0, ppwY = 0;
+        var haveGridMap = gridForMap != null
+                          && WorldNavGridPreviewRenderer.TryGetMapPreviewPixelsPerWorldMeter(_world, cellPx,
+                              _navChunkStoreDirectoryAbsolute, out ppwX, out ppwY);
+        var gridOx = haveGridMap ? gridForMap!.OriginX : 0.0;
+        var gridOy = haveGridMap ? gridForMap!.OriginY : 0.0;
+        var scaleFallback = SldPreviewScale.Value;
+
+        Point ProjectWorld(GeoVec2 p) => haveGridMap
+            ? new Point(marginOx + (p.X - gridOx) * ppwX, marginOy + (p.Y - gridOy) * ppwY)
+            : new Point(marginOx + p.X * scaleFallback, marginOy + p.Y * scaleFallback);
+
         Image? raster = null;
 
         if (ChkPreviewRaster is { IsChecked: true } && SldRasterCellPx is not null)
         {
             var hill = ChkPreviewHillshade is { IsChecked: true };
-            raster = WorldNavGridPreviewRenderer.TryBuildNavGridImage(_world, SldRasterCellPx.Value, hill, ox, oy,
+            raster = WorldNavGridPreviewRenderer.TryBuildNavGridImage(_world, SldRasterCellPx.Value, hill, marginOx,
+                marginOy,
                 _navChunkStoreDirectoryAbsolute);
             if (raster is not null)
+            {
+                Canvas.SetZIndex(raster, 0);
                 PreviewCanvas.Children.Add(raster);
+            }
         }
+
+        var regionStroke = new SolidColorBrush(Color.FromRgb(255, 232, 90));
+        var terrStroke = new SolidColorBrush(Color.FromRgb(255, 64, 160));
+        const double regionStrokePx = 3.25;
+        const double terrStrokePx = 3.0;
 
         if (ChkPreviewLoreRegions is { IsChecked: true })
         {
             foreach (var reg in _world.RegionBoundaries)
             {
-                var el = PolyFromVertices(reg.Boundary.Vertices, scale, ox, oy, Brushes.DodgerBlue, 1.2);
+                var el = PolyFromVerticesMapped(reg.Boundary.Vertices, ProjectWorld, regionStroke, regionStrokePx);
                 if (el is not null)
+                {
+                    Canvas.SetZIndex(el, 10);
                     PreviewCanvas.Children.Add(el);
+                }
             }
         }
 
@@ -1058,9 +1283,12 @@ public partial class MainWindow : Window
         {
             foreach (var terr in _world.Territories)
             {
-                var el = PolyFromVertices(terr.Boundary.Vertices, scale, ox, oy, Brushes.OrangeRed, 1);
+                var el = PolyFromVerticesMapped(terr.Boundary.Vertices, ProjectWorld, terrStroke, terrStrokePx);
                 if (el is not null)
+                {
+                    Canvas.SetZIndex(el, 11);
                     PreviewCanvas.Children.Add(el);
+                }
             }
         }
 
@@ -1071,24 +1299,41 @@ public partial class MainWindow : Window
                 switch (f)
                 {
                     case PathCorridorFeature p:
-                        var line = PolylineFromPath(p.Centerline, scale, ox, oy, Brushes.ForestGreen, 2);
+                        var line = PolylineFromPathMapped(p.Centerline, ProjectWorld, Brushes.ForestGreen, 2);
                         if (line is not null)
+                        {
+                            Canvas.SetZIndex(line, 5);
                             PreviewCanvas.Children.Add(line);
+                        }
+
                         break;
                     case GroundPlateauFeature g:
-                        var gp = PolyFromVertices(g.Boundary, scale, ox, oy, Brushes.LightGreen, 0.6);
+                        var gp = PolyFromVerticesMapped(g.Boundary, ProjectWorld, Brushes.LightGreen, 0.6);
                         if (gp is not null)
+                        {
+                            Canvas.SetZIndex(gp, 4);
                             PreviewCanvas.Children.Add(gp);
+                        }
+
                         break;
                     case StandingWaterFeature w:
-                        var wp = PolyFromVertices(w.Shoreline, scale, ox, oy, Brushes.DeepSkyBlue, 0.8);
+                        var wp = PolyFromVerticesMapped(w.Shoreline, ProjectWorld, Brushes.DeepSkyBlue, 0.8);
                         if (wp is not null)
+                        {
+                            Canvas.SetZIndex(wp, 3);
                             PreviewCanvas.Children.Add(wp);
+                        }
+
                         break;
                     case FlowingWaterFeature fw:
-                        var riverLine = PolylineFromPath(fw.ChannelCenterline, scale, ox, oy, Brushes.CornflowerBlue, 2.5);
+                        var riverLine =
+                            PolylineFromPathMapped(fw.ChannelCenterline, ProjectWorld, Brushes.CornflowerBlue, 2.5);
                         if (riverLine is not null)
+                        {
+                            Canvas.SetZIndex(riverLine, 6);
                             PreviewCanvas.Children.Add(riverLine);
+                        }
+
                         break;
                 }
             }
@@ -1097,8 +1342,8 @@ public partial class MainWindow : Window
         // Size from raster (cell space); vector overlays use world XY and can be huge — do not expand canvas from them.
         if (raster is not null)
         {
-            PreviewCanvas.Width = Math.Max(480, ox + raster.Width + 40);
-            PreviewCanvas.Height = Math.Max(480, oy + raster.Height + 40);
+            PreviewCanvas.Width = Math.Max(480, marginOx + raster.Width + 40);
+            PreviewCanvas.Height = Math.Max(480, marginOy + raster.Height + 40);
         }
         else
         {
@@ -1160,6 +1405,41 @@ public partial class MainWindow : Window
             MapPreviewScrollViewer.ScrollToHorizontalOffset(0);
             MapPreviewScrollViewer.ScrollToVerticalOffset(0);
         }, DispatcherPriority.Loaded);
+    }
+
+    private static UIElement? PolyFromVerticesMapped(IReadOnlyList<GeoVec2> v, Func<GeoVec2, Point> toCanvas,
+        Brush stroke, double thickness)
+    {
+        if (v.Count < 2)
+            return null;
+        if (v.Count == 2)
+            return PolylineFromPathMapped(v, toCanvas, stroke, thickness);
+        var poly = new Polygon
+        {
+            Stroke = stroke,
+            StrokeThickness = thickness,
+            Fill = Brushes.Transparent,
+            SnapsToDevicePixels = true,
+        };
+        foreach (var p in v)
+            poly.Points.Add(toCanvas(p));
+        return poly;
+    }
+
+    private static Polyline? PolylineFromPathMapped(IReadOnlyList<GeoVec2> v, Func<GeoVec2, Point> toCanvas,
+        Brush stroke, double thickness)
+    {
+        if (v.Count < 2)
+            return null;
+        var line = new Polyline
+        {
+            Stroke = stroke,
+            StrokeThickness = thickness,
+            SnapsToDevicePixels = true,
+        };
+        foreach (var p in v)
+            line.Points.Add(toCanvas(p));
+        return line;
     }
 
     private static UIElement? PolyFromVertices(IReadOnlyList<GeoVec2> v, double scale, double ox, double oy,
@@ -1230,6 +1510,7 @@ public partial class MainWindow : Window
     {
         EnsureNavBundle();
         Ensure3DFocusInitialized();
+        PreloadNavGridChunksFor3DView();
         var chunkHalf = Sld3DChunkDetailHalf is not null
             ? (int)Math.Clamp(Math.Round(Sld3DChunkDetailHalf.Value), 0, 512)
             : 72;
@@ -1333,6 +1614,7 @@ public partial class MainWindow : Window
 
         _3dFocusWorld = new Vec3 { X = x, Y = y, Z = z };
         _3dFocusInitialized = true;
+        PreloadNavGridChunksFor3DView();
         Apply3DCameraOnly();
         if (_world.NavGridCellSource is NavGridChunkCellSource && Equals(MainTabs.SelectedItem, Scene3DTab) &&
             Chk3DTerrain.IsChecked == true)
@@ -1374,6 +1656,7 @@ public partial class MainWindow : Window
         }
         else
             Sld3DDistance.Value = Math.Clamp(diag * 0.55, Sld3DDistance.Minimum, Sld3DDistance.Maximum);
+        PreloadNavGridChunksFor3DView();
         Apply3DCameraOnly();
         if (_world.NavGridCellSource is NavGridChunkCellSource && Equals(MainTabs.SelectedItem, Scene3DTab) &&
             Chk3DTerrain.IsChecked == true)

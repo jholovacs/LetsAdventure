@@ -34,7 +34,7 @@ public sealed class NavCellDefinition
     /// <summary>Same as <see cref="ElevationZ"/> on dry land; underwater, the bottom of the water column.</summary>
     public double BedElevationZ { get; set; }
 
-    /// <summary>Water surface Z when fluid is present; 0 on dry land.</summary>
+    /// <summary>Water surface world Z when fluid is present; 0 on dry land (see world sea level at mid-Z in authoring docs).</summary>
     public double WaterSurfaceZ { get; set; }
 
     public double MovementCostMultiplier { get; set; } = 1;

@@ -5,6 +5,8 @@
         Title="LetsAdventure World Editor"
         Height="760" Width="1040"
         WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource Theme.Window.Background}"
+        Foreground="{DynamicResource Theme.Window.Foreground}"
         PreviewKeyDown="Window_PreviewKeyDown"
         PreviewKeyUp="Window_PreviewKeyUp">
   <DockPanel>
@@ -12,7 +14,6 @@
       <MenuItem Header="_File">
         <MenuItem Header="_New" Click="New_Click" InputGestureText="Ctrl+N" />
         <MenuItem Header="_Generate procedural world…" Click="GenerateWorld_Click" />
-        <MenuItem Header="Generate _baseline world (large)" Click="BaselineWorld_Click" />
         <MenuItem Header="_Open…" Click="Open_Click" InputGestureText="Ctrl+O" />
         <MenuItem Header="_Save" Click="Save_Click" InputGestureText="Ctrl+S" />
         <MenuItem Header="Save _As…" Click="SaveAs_Click" />
@@ -27,10 +28,6 @@
         <MenuItem Header="Refresh _3D scene" Click="World3D_RefreshMenu_Click" />
       </MenuItem>
     </Menu>
-    <ToolBar DockPanel.Dock="Top">
-      <Button Content="Baseline world (2³¹ × 2³¹ XY, Z 0–12288)" Click="BaselineWorld_Click"
-              ToolTip="Generate a huge navigable baseline: 2^31 × 2^31 XY (~2.15e9 per axis), 1024² nav grid, hydrology, ocean, high Z headroom for mountains, and a subdivided smooth 3D terrain mesh." />
-    </ToolBar>
     <StatusBar DockPanel.Dock="Bottom">
       <StatusBarItem>
         <TextBlock x:Name="StatusPath" Text="No file" />
@@ -41,12 +38,15 @@
       </StatusBarItem>
     </StatusBar>
     <TabControl x:Name="MainTabs" Margin="8" SelectionChanged="MainTabs_SelectionChanged">
-      <TabItem Header="Metadata">
+      <TabItem Header="Map">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel Margin="12" MaxWidth="720">
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Muted}" Margin="0,0,0,10"
+                       Text="World size in meters (SI). Baseline maps procedural ocean to your Z midpoint, applies water offset for sea/lake/river level vs land, and land freshwater % to scale river tributary density on terrain. Generate baseline builds continental terrain, hydrology, ocean, and nav grid for this volume." />
             <Label Content="Coordinate description" />
             <TextBox x:Name="TxtCoordDesc" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="48" />
-            <Grid Margin="0,12,0,0">
+            <TextBlock Text="World bounds (min / max, meters)" FontWeight="SemiBold" Margin="0,14,0,6" />
+            <Grid Margin="0,0,0,0">
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="120" />
@@ -58,21 +58,51 @@
                 <RowDefinition />
                 <RowDefinition />
                 <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
               </Grid.RowDefinitions>
-              <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Global min X" Margin="0,4" />
+              <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Min X" Margin="0,4" />
               <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtMinX" Margin="0,4" />
-              <TextBlock Grid.Row="0" Grid.Column="3" VerticalAlignment="Center" Text="Global max X" Margin="0,4" />
+              <TextBlock Grid.Row="0" Grid.Column="3" VerticalAlignment="Center" Text="Max X" Margin="0,4" />
               <TextBox Grid.Row="0" Grid.Column="4" x:Name="TxtMaxX" Margin="0,4" />
-              <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Global min Y" Margin="0,4" />
+              <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Min Y" Margin="0,4" />
               <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtMinY" Margin="0,4" />
-              <TextBlock Grid.Row="1" Grid.Column="3" VerticalAlignment="Center" Text="Global max Y" Margin="0,4" />
+              <TextBlock Grid.Row="1" Grid.Column="3" VerticalAlignment="Center" Text="Max Y" Margin="0,4" />
               <TextBox Grid.Row="1" Grid.Column="4" x:Name="TxtMaxY" Margin="0,4" />
-              <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Global min Z" Margin="0,4" />
+              <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Min Z" Margin="0,4" />
               <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtMinZ" Margin="0,4" />
-              <TextBlock Grid.Row="2" Grid.Column="3" VerticalAlignment="Center" Text="Global max Z" Margin="0,4" />
+              <TextBlock Grid.Row="2" Grid.Column="3" VerticalAlignment="Center" Text="Max Z" Margin="0,4" />
               <TextBox Grid.Row="2" Grid.Column="4" x:Name="TxtMaxZ" Margin="0,4" />
+              <TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Text="Water offset (m)" Margin="0,4"
+                         ToolTip="Added to ocean, lake, and river surfaces (and beds) after normalization. Negative lowers water relative to land." />
+              <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtWaterSurfaceOffset" Margin="0,4" Text="-2200" />
+              <TextBlock Grid.Row="3" Grid.Column="3" Grid.ColumnSpan="2" VerticalAlignment="Center" Margin="8,4,0,4"
+                         TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Muted}"
+                         Text="Negative = lower water vs land (baseline default)." />
+              <TextBlock Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Text="Land freshwater (%)" Margin="0,4"
+                         ToolTip="Relative amount of river channel on land (tributary headwater threshold). 100% = current engine default; lower = drier, fewer tributaries." />
+              <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtLandFreshwaterCoveragePct" Margin="0,4" Text="100" />
+              <TextBlock Grid.Row="4" Grid.Column="3" Grid.ColumnSpan="2" VerticalAlignment="Center" Margin="8,4,0,4"
+                         TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Muted}"
+                         Text="100 = default; 50 ≈ half as much river network; 150 = more." />
             </Grid>
-            <Button Content="Apply metadata to world" Margin="0,16,0,0" HorizontalAlignment="Left" Click="ApplyMetadata_Click" />
+            <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+              <Button Content="Generate baseline map" Padding="10,6" Click="MetadataGenerateBaseline_Click"
+                      ToolTip="Uses the bounds above. Large maps use a 4096² nav sample and chunk the nav store." />
+              <Button Content="Load map…" Padding="10,6" Margin="10,0,0,0" Click="LoadMap_Click"
+                      ToolTip="Open physical_world.json (and optional .navgrid folder)." />
+            </StackPanel>
+            <Button Content="Apply bounds &amp; description (no regen)" Margin="0,10,0,0" HorizontalAlignment="Left"
+                    Padding="10,4" Click="ApplyMetadata_Click" />
+            <TextBlock Margin="0,20,0,6" Foreground="{DynamicResource Theme.Text.Muted}" TextWrapping="Wrap"
+                       Text="Chunked nav grids: load all cells into RAM for editing, or release back to streaming." />
+            <StackPanel Orientation="Horizontal">
+              <Button Content="Load entire grid from chunk store" Padding="8,4" Click="NavGridLoadAllFromChunks_Click"
+                      ToolTip="Read all .bin chunks + manifest into RAM." />
+              <Button Content="Release cells to chunk store" Margin="10,0,0,0" Padding="8,4"
+                      Click="NavGridReleaseCellsToChunkStore_Click"
+                      ToolTip="Flush full grid to disk if needed, then stream again." />
+            </StackPanel>
           </StackPanel>
         </ScrollViewer>
       </TabItem>
@@ -166,69 +196,10 @@
           </DockPanel>
         </Grid>
       </TabItem>
-      <TabItem x:Name="NavGraphTab" Header="Nav graph">
-        <Grid Margin="8">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="*" />
-            <RowDefinition Height="8" />
-            <RowDefinition Height="*" />
-          </Grid.RowDefinitions>
-          <DockPanel Grid.Row="0">
-            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
-              <Button Content="Add node" Click="NavNodeAdd_Click" />
-              <Button Content="Remove node" Margin="8,0,0,0" Click="NavNodeRemove_Click" />
-            </StackPanel>
-            <DataGrid x:Name="GridNavNodes" AutoGenerateColumns="False" CanUserAddRows="False"
-                      CellEditEnding="GridNav_CellEditEnding">
-              <DataGrid.Columns>
-                <DataGridTextColumn Header="Id" Binding="{Binding Id}" Width="*" />
-                <DataGridTextColumn Header="X" Binding="{Binding Position.X}" Width="80" />
-                <DataGridTextColumn Header="Y" Binding="{Binding Position.Y}" Width="80" />
-                <DataGridTextColumn Header="Z" Binding="{Binding Position.Z}" Width="80" />
-                <DataGridTextColumn Header="Tags (comma)" Binding="{Binding TagsCsv}" Width="*" />
-              </DataGrid.Columns>
-            </DataGrid>
-          </DockPanel>
-          <DockPanel Grid.Row="2">
-            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
-              <Button Content="Add edge" Click="NavEdgeAdd_Click" />
-              <Button Content="Remove edge" Margin="8,0,0,0" Click="NavEdgeRemove_Click" />
-            </StackPanel>
-            <DataGrid x:Name="GridNavEdges" AutoGenerateColumns="False" CanUserAddRows="False"
-                      CellEditEnding="GridNav_CellEditEnding">
-              <DataGrid.Columns>
-                <DataGridTextColumn Header="From" Binding="{Binding FromId}" Width="*" />
-                <DataGridTextColumn Header="To" Binding="{Binding ToId}" Width="*" />
-                <DataGridTextColumn Header="Cost" Binding="{Binding TraverseCost}" Width="80" />
-                <DataGridCheckBoxColumn Header="Bidirectional" Binding="{Binding Bidirectional}" Width="100" />
-              </DataGrid.Columns>
-            </DataGrid>
-          </DockPanel>
-        </Grid>
-      </TabItem>
-      <TabItem Header="Nav grid">
-        <StackPanel Margin="12" HorizontalAlignment="Left">
-          <StackPanel Orientation="Horizontal" Margin="0,4">
-            <Label Content="Origin X" Width="100" />
-            <TextBox x:Name="TxtGridOriginX" Width="120" />
-            <Label Content="Origin Y" Width="80" Margin="16,0,0,0" />
-            <TextBox x:Name="TxtGridOriginY" Width="120" />
-          </StackPanel>
-          <StackPanel Orientation="Horizontal" Margin="0,4">
-            <Label Content="Cell size" Width="100" />
-            <TextBox x:Name="TxtGridCellSize" Width="120" />
-            <Label Content="Columns" Width="80" Margin="16,0,0,0" />
-            <TextBox x:Name="TxtGridColumns" Width="120" />
-            <Label Content="Rows" Width="60" Margin="16,0,0,0" />
-            <TextBox x:Name="TxtGridRows" Width="120" />
-          </StackPanel>
-          <Button Content="Apply nav grid" Margin="0,16,0,0" HorizontalAlignment="Left" Click="NavGridApply_Click" />
-        </StackPanel>
-      </TabItem>
       <TabItem Header="Map preview" x:Name="MapPreviewTab">
         <DockPanel Margin="8">
           <StackPanel DockPanel.Dock="Top">
-            <TextBlock Margin="0,0,0,6" Foreground="#444" TextWrapping="Wrap"
+            <TextBlock Margin="0,0,0,6" Foreground="{DynamicResource Theme.Text.Muted}" TextWrapping="Wrap"
                        Text="Wheel: zoom. Ctrl+wheel: raster detail. WASD: pan N/W/S/E. Hold LMB and drag to grab-pan. Toggle overlays below." />
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
               <Label Content="Vector scale (px / world unit):" VerticalAlignment="Center" />
@@ -259,7 +230,9 @@
               <TextBlock VerticalAlignment="Center" Margin="8,0,0,0" Text="{Binding ElementName=SldRasterCellPx, Path=Value}" />
             </StackPanel>
           </StackPanel>
-          <Border BorderBrush="Gray" BorderThickness="1" Background="#FFF8F8F8">
+          <Border BorderThickness="1"
+                  BorderBrush="{DynamicResource Theme.Border}"
+                  Background="{DynamicResource Theme.Panel.Background}">
             <ScrollViewer x:Name="MapPreviewScrollViewer"
                           HorizontalScrollBarVisibility="Auto"
                           VerticalScrollBarVisibility="Auto"
@@ -283,7 +256,7 @@
           </Grid.ColumnDefinitions>
           <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,8,0">
             <StackPanel Margin="8">
-              <TextBlock TextWrapping="Wrap" Foreground="#444"
+              <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Muted}"
                          Text="World X/Y horizontal, Z up. LMB + drag orbits. Mouse wheel zooms. WASD pans the view target on the ground plane (move through the scene). Use focus fields or “Center on bounds” to jump." />
               <GroupBox Header="Navigate to (world)" Margin="0,10,0,0">
                 <StackPanel Margin="6">
@@ -345,9 +318,12 @@
                       ToolTip="Chunked terrain: updates the high-res patch around the current orbit focus." />
             </StackPanel>
           </ScrollViewer>
-          <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1" Background="#FF6BB8D6">
+          <Border Grid.Column="1"
+                  BorderBrush="{DynamicResource Theme.Border}"
+                  BorderThickness="1"
+                  Background="{DynamicResource Theme.Viewport.BorderBrush}">
             <hx:Viewport3DX x:Name="WorldViewportDx"
-                            BackgroundColor="#FF87CEEB"
+                            BackgroundColor="{DynamicResource Theme.Viewport.ClearColor}"
                             Focusable="True"
                             IsRotationEnabled="False"
                             IsPanEnabled="False"

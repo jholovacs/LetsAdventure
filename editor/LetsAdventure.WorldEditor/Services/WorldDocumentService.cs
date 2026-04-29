@@ -12,11 +12,17 @@ public static class WorldDocumentService
         new()
         {
             SchemaVersion = 1,
-            CoordinateDescription = "X/Y horizontal plane, Z vertical (up). 1 coordinate unit = 1 meter (SI).",
+            CoordinateDescription =
+                "X/Y horizontal plane, Z vertical (up). 1 unit = 1 m (SI). Sea level = (MinZ+MaxZ)/2. Ground level is height above sea level for shoreline and land/water contours.",
             GlobalBounds = new AxisAlignedBounds
             {
-                Min = new Vec3(),
-                Max = new Vec3 { X = 512, Y = 512, Z = 256 },
+                Min = new Vec3 { Z = BaselinePhysicalWorldGenerator.DefaultMinZ },
+                Max = new Vec3
+                {
+                    X = BaselinePhysicalWorldGenerator.DefaultExtentXy,
+                    Y = BaselinePhysicalWorldGenerator.DefaultExtentXy,
+                    Z = BaselinePhysicalWorldGenerator.DefaultMaxZ,
+                },
             },
             Navigation = new NavigationBundle
             {

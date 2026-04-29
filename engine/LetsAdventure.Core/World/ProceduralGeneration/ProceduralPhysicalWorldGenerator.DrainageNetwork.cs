@@ -8,6 +8,13 @@ namespace LetsAdventure.Core.World;
 public static partial class ProceduralPhysicalWorldGenerator
 {
     /// <summary>
+    /// Minimum contributing-area floor for a D8 channel headwater (see <c>BuildAndStampDrainageRiverNetwork</c>).
+    /// Value is 1.75² vs legacy calibration (two +75% tightening passes) — trims small tributaries that over-stamp river cells.
+    /// Scaled again by <see cref="ProceduralWorldSpec.LandFreshwaterStrictness"/>.
+    /// </summary>
+    private const double TributaryHeadwaterCatchmentFloorScale = 1.75 * 1.75;
+
+    /// <summary>
     /// D8 flow directions + flow accumulation on terrain (rivers not yet carved). Area draining through each land cell in m².
     /// </summary>
     private static DrainageField ComputeDrainageField(
@@ -307,9 +314,12 @@ public static partial class ProceduralPhysicalWorldGenerator
             return (0, 0);
 
         var cellArea = cell * cell;
+        var strict = Math.Clamp(spec.LandFreshwaterStrictness, 0.12, 40.0);
         var floor = Math.Max(
-            cellArea * 5.0 * Math.Max(0.25, spec.DrainageMinCatchmentAreaFactor),
-            maxAcc * 0.0032 * Math.Max(0.12, spec.DrainageTributaryDensity));
+                cellArea * 5.0 * Math.Max(0.25, spec.DrainageMinCatchmentAreaFactor),
+                maxAcc * 0.0032 * Math.Max(0.12, spec.DrainageTributaryDensity))
+            * TributaryHeadwaterCatchmentFloorScale
+            * strict;
         var maxHeadwaters = Math.Max(24,
             (int)(Math.Sqrt(landCells) * Math.Max(0.5, spec.DrainageHeadwaterBudgetFactor)));
 
@@ -326,7 +336,7 @@ public static partial class ProceduralPhysicalWorldGenerator
 
         if (headwaters.Count == 0)
         {
-            tLow = Math.Min(floor, cellArea * 2.5);
+            tLow = Math.Min(floor, cellArea * 2.5 * TributaryHeadwaterCatchmentFloorScale * strict);
             headwaters = CollectChannelHeadwaters(contributingAreaM2, isOcean, lakeId, downC, downR, cols, rows, tLow);
         }
 

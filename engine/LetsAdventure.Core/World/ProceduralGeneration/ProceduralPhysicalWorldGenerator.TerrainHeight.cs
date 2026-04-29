@@ -317,23 +317,58 @@ public static partial class ProceduralPhysicalWorldGenerator
             if (bestC < 0 || bestScore < 0)
                 continue;
             peaks.Add((bestC, bestR));
-            var lift = spec.TerrainAmplitude * spec.MountainLiftScale * (0.8 + rng.NextDouble() * 0.52);
-            var radiusCells = Math.Max(3.6, span * (0.044 + rng.NextDouble() * 0.054));
+            var cellSz = Math.Max(0.5, spec.CellSize);
+            var basePeakZ = h[bestC, bestR];
+            var inclineDeg = Math.Clamp(spec.MountainMinInclineTowardPeakDegrees, 5, 85);
+            var tanMinSlope = Math.Tan(inclineDeg * (Math.PI / 180.0));
+            var maxPeakAbs = spec.MaxZBound - spec.MountainPeakClearanceBelowMaxZM;
+            var minPeakAbs = spec.MountainPeakMinAbsoluteZM;
+            var canPinAbsolute = maxPeakAbs > minPeakAbs + 1e-3;
+
+            const double minSpikey = 0.76;
+            const double maxSpikey = 1.24;
+            double coneHeight;
+            if (canPinAbsolute)
+            {
+                if (basePeakZ >= maxPeakAbs - 1e-3)
+                    continue;
+                var targetPeak = Math.Clamp(Math.Max(basePeakZ + 1.0, minPeakAbs), minPeakAbs, maxPeakAbs);
+                coneHeight = Math.Max(1.0, targetPeak - basePeakZ);
+                coneHeight = Math.Max(coneHeight, (minPeakAbs - basePeakZ) / minSpikey);
+                coneHeight = Math.Min(coneHeight, (maxPeakAbs - basePeakZ) / maxSpikey);
+                if (coneHeight < 1.0)
+                    continue;
+                if (basePeakZ + coneHeight * minSpikey > maxPeakAbs + 1e-3)
+                    continue;
+                if (basePeakZ + coneHeight * maxSpikey < minPeakAbs - 1e-3)
+                    continue;
+            }
+            else
+            {
+                coneHeight = spec.TerrainAmplitude * spec.MountainLiftScale * (0.8 + rng.NextDouble() * 0.52);
+            }
+
+            var radiusCellsLoose = Math.Max(3.6, span * (0.044 + rng.NextDouble() * 0.054));
+            var radiusWorldLoose = radiusCellsLoose * cellSz;
+            var maxRadiusWorld = coneHeight * minSpikey / Math.Max(tanMinSlope, 1e-6);
+            var radiusWorld = Math.Min(radiusWorldLoose, maxRadiusWorld);
+            if (radiusWorld < cellSz * 2.5)
+                radiusWorld = Math.Min(maxRadiusWorld, cellSz * 2.5);
+            var radiusCells = radiusWorld / cellSz;
             var peakIndex = p;
             ParallelForCols(cols, rows, (c, r) =>
             {
                 var dx = c - bestC;
                 var dy = r - bestR;
-                var d = Math.Sqrt(dx * dx + dy * dy) / radiusCells;
-                if (d > 1.14)
+                var rhoWorld = Math.Sqrt(dx * dx + dy * dy) * cellSz;
+                if (rhoWorld > radiusWorld)
                     return;
-                var t = Math.Clamp(d, 0, 1);
-                var bump = lift * Math.Pow(1.0 - t, 1.94);
+                var cone = coneHeight * (1.0 - rhoWorld / radiusWorld);
                 var nx = c / (double)Math.Max(cols - 1, 1);
                 var ny = r / (double)Math.Max(rows - 1, 1);
                 var spikey = 1.0 + 0.24 * RidgedFbm(nx * 14.0, ny * 14.0, 3, seed + peakIndex * 173);
-                h[c, r] += bump * spikey;
-                if (d < 0.5)
+                h[c, r] += cone * spikey;
+                if (rhoWorld <= radiusWorld * 0.5)
                     mountainMask[c, r] = true;
             });
         }

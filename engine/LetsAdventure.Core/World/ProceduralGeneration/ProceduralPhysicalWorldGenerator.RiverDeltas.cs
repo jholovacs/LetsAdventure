@@ -26,7 +26,9 @@ public static partial class ProceduralPhysicalWorldGenerator
     {
         var distOcean = GridDistanceToOcean(isOcean, cols, rows);
         var gentle = Math.Max(spec.MaxLandStepOrthogonal * 0.26, spec.TerrainAmplitude * 0.0145);
-        var distHalfW = spec.RiverChannelHalfWidthWorld * 0.38;
+        var distHalfW = Math.Min(
+            Math.Min(spec.RiverChannelHalfWidthWorld * 0.35, 11.0),
+            Math.Max(spec.RiverChannelHalfWidthMinWorld * 0.65, cell * 0.22));
         var stripeSeed = spec.Seed ^ 0x4D656C74;
         var snapshot = riverPaths.ToArray();
 

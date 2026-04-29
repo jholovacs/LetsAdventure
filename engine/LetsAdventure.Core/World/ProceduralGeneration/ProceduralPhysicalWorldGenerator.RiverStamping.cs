@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using LetsAdventure.Core.Simulation;
@@ -7,6 +7,115 @@ namespace LetsAdventure.Core.World;
 
 public static partial class ProceduralPhysicalWorldGenerator
 {
+    /// <summary>
+    /// Maps grid buckets to river path indices whose (expanded) bounding boxes touch the bucket.
+    /// Avoids scanning every path at every river cell during channel bed carving.
+    /// </summary>
+    private sealed class RiverPathBucketIndex
+    {
+        private readonly int _bucketCells;
+        private readonly int _bxMax;
+        private readonly int _byMax;
+        private readonly Dictionary<(int bx, int by), List<int>> _pathsByBucket = new();
+
+        public RiverPathBucketIndex(
+            int cols,
+            int rows,
+            List<List<(int c, int r)>> riverPaths,
+            int expandCells)
+        {
+            _bucketCells = Math.Clamp(Math.Max(48, Math.Max(cols, rows) / 48), 56, 200);
+            _bxMax = Math.Max(0, (cols - 1) / _bucketCells);
+            _byMax = Math.Max(0, (rows - 1) / _bucketCells);
+            var ex = Math.Max(0, expandCells);
+
+            for (var pi = 0; pi < riverPaths.Count; pi++)
+            {
+                var path = riverPaths[pi];
+                if (path.Count == 0)
+                    continue;
+
+                var c0 = int.MaxValue;
+                var c1 = int.MinValue;
+                var r0 = int.MaxValue;
+                var r1 = int.MinValue;
+                foreach (var (c, r) in path)
+                {
+                    c0 = Math.Min(c0, c);
+                    c1 = Math.Max(c1, c);
+                    r0 = Math.Min(r0, r);
+                    r1 = Math.Max(r1, r);
+                }
+
+                c0 = Math.Clamp(c0 - ex, 0, cols - 1);
+                c1 = Math.Clamp(c1 + ex, 0, cols - 1);
+                r0 = Math.Clamp(r0 - ex, 0, rows - 1);
+                r1 = Math.Clamp(r1 + ex, 0, rows - 1);
+
+                var bc0 = c0 / _bucketCells;
+                var bc1 = c1 / _bucketCells;
+                var br0 = r0 / _bucketCells;
+                var br1 = r1 / _bucketCells;
+
+                for (var bx = bc0; bx <= bc1; bx++)
+                {
+                    for (var by = br0; by <= br1; by++)
+                        Add(bx, by, pi);
+                }
+            }
+        }
+
+        private void Add(int bx, int by, int pi)
+        {
+            if (bx < 0 || by < 0 || bx > _bxMax || by > _byMax)
+                return;
+            var k = (bx, by);
+            if (!_pathsByBucket.TryGetValue(k, out var list))
+            {
+                list = new List<int>(4);
+                _pathsByBucket[k] = list;
+            }
+
+            list.Add(pi);
+        }
+
+        public int BucketCells => _bucketCells;
+
+        public int MaxRing(int bc, int br) =>
+            2 + Math.Max(Math.Max(bc, _bxMax - bc), Math.Max(br, _byMax - br));
+
+        public void ForEachPathInRing(int bc, int br, int rad, Action<int> onPath)
+        {
+            void Visit(int bx, int by)
+            {
+                if (bx < 0 || by < 0 || bx > _bxMax || by > _byMax)
+                    return;
+                if (!_pathsByBucket.TryGetValue((bx, by), out var list))
+                    return;
+                for (var i = 0; i < list.Count; i++)
+                    onPath(list[i]);
+            }
+
+            if (rad == 0)
+            {
+                Visit(bc, br);
+                return;
+            }
+
+            for (var dbc = -rad; dbc <= rad; dbc++)
+            {
+                Visit(bc + dbc, br + rad);
+                Visit(bc + dbc, br - rad);
+            }
+
+            for (var dbr = -rad + 1; dbr <= rad - 1; dbr++)
+            {
+                Visit(bc + rad, br + dbr);
+                Visit(bc - rad, br + dbr);
+            }
+        }
+    }
+
     private static double RiverPathWorldArcLength(List<(int c, int r)> path, ProceduralWorldSpec spec)
     {
         if (path.Count < 2)
@@ -45,17 +154,44 @@ public static partial class ProceduralPhysicalWorldGenerator
         if (riverPaths.Count == 0)
             return;
 
-        if (ExpectLongRunningGridPhase(cols, rows))
-            Report(progress, "[coastal] Carving river channel beds (parallel; width-aware cross-section)…");
-
         var effCarve = spec.RiverBedCarve * 0.55;
         var fallbackHalfW = Math.Max(spec.RiverChannelHalfWidthWorld, cell * 0.5);
+        var hwMax = spec.RiverChannelHalfWidthMaxWorld > 1e-6
+            ? spec.RiverChannelHalfWidthMaxWorld
+            : Math.Max(fallbackHalfW * 2.75, spec.RiverChannelHalfWidthMinWorld * 2.2);
+        var expandCells = (int)Math.Ceiling(hwMax / Math.Max(cell, 1e-9)) + 8;
 
         var pathLens = new double[riverPaths.Count];
         for (var pi = 0; pi < riverPaths.Count; pi++)
             pathLens[pi] = RiverPathWorldArcLength(riverPaths[pi], spec);
 
-        ParallelForCols(cols, rows, (c, r) =>
+        if (RiverChannelCarveVulkan.TryCarve(h, cols, rows, cell, spec, riverPaths, isRiver, isOcean, lakeId,
+                oceanWaterZ, riverCellHalfWidthWorld, effCarve, fallbackHalfW, hwMax, expandCells, pathLens,
+                progress))
+            return;
+
+        var report = ExpectLongRunningGridPhase(cols, rows) && progress != null;
+        if (report)
+            Report(progress, "[coastal] Carving river channel beds (parallel columns; spatial path index + cross-section)…");
+
+        const int brutePathCap = 72;
+        RiverPathBucketIndex? index = null;
+        if (riverPaths.Count > brutePathCap)
+            index = new RiverPathBucketIndex(cols, rows, riverPaths, expandCells);
+
+        var nonEmptyRiverPaths = 0;
+        for (var pi = 0; pi < riverPaths.Count; pi++)
+        {
+            if (riverPaths[pi].Count > 0)
+                nonEmptyRiverPaths++;
+        }
+
+        using var pathTagTls = new ThreadLocal<long[]>(() => new long[riverPaths.Count]);
+        var colReportStep = cols >= 384 ? Math.Max(1, cols / 12) : Math.Max(1, cols / 4);
+        var sw = Stopwatch.StartNew();
+        var nextReportMs = 2000L;
+
+        void CarveCell(int c, int r)
         {
             if (!isRiver[c, r] || isOcean[c, r] || lakeId[c, r] != 0)
                 return;
@@ -70,17 +206,57 @@ public static partial class ProceduralPhysicalWorldGenerator
             var bestDist = double.PositiveInfinity;
             var bestAlong = 0.0;
             var bestLen = 1.0;
-            for (var pi = 0; pi < riverPaths.Count; pi++)
+
+            if (index is null)
             {
-                var path = riverPaths[pi];
-                if (path.Count == 0)
-                    continue;
-                ClosestPointOnRiverPath(wx, wy, path, spec, out var d, out var sAlong);
-                if (d < bestDist)
+                for (var pi = 0; pi < riverPaths.Count; pi++)
                 {
-                    bestDist = d;
-                    bestAlong = sAlong;
-                    bestLen = Math.Max(pathLens[pi], 1e-6);
+                    var path = riverPaths[pi];
+                    if (path.Count == 0)
+                        continue;
+                    ClosestPointOnRiverPath(wx, wy, path, spec, out var d, out var sAlong);
+                    if (d < bestDist)
+                    {
+                        bestDist = d;
+                        bestAlong = sAlong;
+                        bestLen = Math.Max(pathLens[pi], 1e-6);
+                    }
+                }
+            }
+            else
+            {
+                var tags = pathTagTls.Value!;
+                var tag = (long)c * rows + r + 1L;
+                var bc = c / index.BucketCells;
+                var br = r / index.BucketCells;
+                var maxRing = index.MaxRing(bc, br);
+                var pathsEvaluated = 0;
+
+                for (var rad = 0; rad <= maxRing; rad++)
+                {
+                    index.ForEachPathInRing(bc, br, rad, pi =>
+                    {
+                        if ((uint)pi >= (uint)riverPaths.Count)
+                            return;
+                        if (tags[pi] == tag)
+                            return;
+                        tags[pi] = tag;
+
+                        var path = riverPaths[pi];
+                        if (path.Count == 0)
+                            return;
+                        pathsEvaluated++;
+                        ClosestPointOnRiverPath(wx, wy, path, spec, out var d, out var sAlong);
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestAlong = sAlong;
+                            bestLen = Math.Max(pathLens[pi], 1e-6);
+                        }
+                    });
+
+                    if (pathsEvaluated >= nonEmptyRiverPaths)
+                        break;
                 }
             }
 
@@ -96,9 +272,47 @@ public static partial class ProceduralPhysicalWorldGenerator
             cross *= cross;
             var target = bank + (thalweg - bank) * cross;
             h[c, r] = Math.Min(h[c, r], target);
-        });
+        }
 
-        if (ExpectLongRunningGridPhase(cols, rows))
+        void CarveColumn(int c)
+        {
+            for (var r = 0; r < rows; r++)
+                CarveCell(c, r);
+        }
+
+        if (ShouldParallelize(cols, rows))
+        {
+            var finished = 0;
+            Parallel.For(0, cols, c =>
+            {
+                CarveColumn(c);
+                if (!report)
+                    return;
+                var v = Interlocked.Increment(ref finished);
+                if (v == 1 || v == cols || v % colReportStep == 0 || sw.ElapsedMilliseconds >= nextReportMs)
+                {
+                    Report(progress!,
+                        $"[coastal] Carving river channel beds: columns {v}/{cols} ({riverPaths.Count:N0} paths, bucket index={(index is not null ? "on" : "brute")})…");
+                    nextReportMs = sw.ElapsedMilliseconds + 2000L;
+                }
+            });
+        }
+        else
+        {
+            for (var c = 0; c < cols; c++)
+            {
+                CarveColumn(c);
+                if (report && (c == 0 || c == cols - 1 || (c + 1) % colReportStep == 0 ||
+                               sw.ElapsedMilliseconds >= nextReportMs))
+                {
+                    Report(progress!,
+                        $"[coastal] Carving river channel beds: columns {c + 1}/{cols} ({riverPaths.Count:N0} paths)…");
+                    nextReportMs = sw.ElapsedMilliseconds + 2000L;
+                }
+            }
+        }
+
+        if (report)
             Report(progress, "[coastal] River channel bed carve finished.");
     }
 
